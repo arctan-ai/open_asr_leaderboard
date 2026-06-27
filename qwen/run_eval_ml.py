@@ -11,6 +11,7 @@ from datasets import load_dataset, Audio
 
 wer_metric = evaluate.load("wer")
 
+
 def main(args):
     CONFIG_NAME = args.config_name
     SPLIT_NAME = args.split
@@ -32,7 +33,9 @@ def main(args):
         max_inference_batch_size=args.batch_size,
         max_new_tokens=args.max_new_tokens,
     )
-    print(f"Model size: {sum(p.numel() for p in model.model.parameters()) / 1e9:.2f}B parameters")
+    print(
+        f"Model size: {sum(p.numel() for p in model.model.parameters()) / 1e9:.2f}B parameters"
+    )
 
     # Load dataset using the HuggingFace dataset repository
     print(f"Loading dataset: {args.dataset} with config: {CONFIG_NAME}")
@@ -58,7 +61,9 @@ def main(args):
     def benchmark(batch):
         # Load audio inputs
         audios = [audio["array"] for audio in batch["audio"]]
-        batch["audio_length_s"] = [len(audio) / batch["audio"][0]["sampling_rate"] for audio in audios]
+        batch["audio_length_s"] = [
+            len(audio) / batch["audio"][0]["sampling_rate"] for audio in audios
+        ]
         minibatch_size = len(audios)
 
         # START TIMING
@@ -73,7 +78,6 @@ def main(args):
             language=None,  # Auto-detect language
         )
 
-
         # Extract text predictions
         pred_text = [r.text for r in results]
 
@@ -84,14 +88,29 @@ def main(args):
         batch["transcription_time_s"] = minibatch_size * [runtime / minibatch_size]
 
         batch["predictions"] = pred_text  # raw; normalization applied at scoring time
-        batch["references"] = batch["text"]  # raw; normalization applied at scoring time
+        batch["references"] = batch[
+            "text"
+        ]  # raw; normalization applied at scoring time
 
         return batch
 
     if args.warmup_steps is not None and args.warmup_steps > 0:
         print(f"Running {args.warmup_steps} warmup steps...")
-        warmup_dataset = dataset.select(range(min(args.warmup_steps * args.batch_size, len(dataset)))) if not args.streaming else dataset.take(args.warmup_steps * args.batch_size)
-        warmup_dataset = iter(warmup_dataset.map(benchmark, batch_size=args.batch_size, batched=True, remove_columns=["audio"]))
+        warmup_dataset = (
+            dataset.select(
+                range(min(args.warmup_steps * args.batch_size, len(dataset)))
+            )
+            if not args.streaming
+            else dataset.take(args.warmup_steps * args.batch_size)
+        )
+        warmup_dataset = iter(
+            warmup_dataset.map(
+                benchmark,
+                batch_size=args.batch_size,
+                batched=True,
+                remove_columns=["audio"],
+            )
+        )
 
         for _ in tqdm(warmup_dataset, desc="Warming up..."):
             continue
@@ -113,7 +132,10 @@ def main(args):
             dataset = dataset.select(range(min(args.max_eval_samples, len(dataset))))
 
     dataset = dataset.map(
-        benchmark, batch_size=args.batch_size, batched=True, remove_columns=["audio"],
+        benchmark,
+        batch_size=args.batch_size,
+        batched=True,
+        remove_columns=["audio"],
     )
 
     all_results = {
@@ -132,13 +154,20 @@ def main(args):
     filtered = [
         (ref, pred, dur, time_s)
         for ref, pred, dur, time_s in zip(
-            all_results["references"], all_results["predictions"],
-            all_results["audio_length_s"], all_results["transcription_time_s"]
+            all_results["references"],
+            all_results["predictions"],
+            all_results["audio_length_s"],
+            all_results["transcription_time_s"],
         )
         if data_utils.is_target_text_in_range(ref)
     ]
     if filtered:
-        all_results["references"], all_results["predictions"], all_results["audio_length_s"], all_results["transcription_time_s"] = zip(*filtered)
+        (
+            all_results["references"],
+            all_results["predictions"],
+            all_results["audio_length_s"],
+            all_results["transcription_time_s"],
+        ) = zip(*filtered)
         all_results = {k: list(v) for k, v in all_results.items()}
 
     # Write manifest results (WER and RTFX)
@@ -154,12 +183,18 @@ def main(args):
     )
     print("Results saved at path:", os.path.abspath(manifest_path))
 
-    norm_refs = [data_utils.ml_normalizer(r, lang=LANGUAGE) for r in all_results["references"]]
-    norm_preds = [data_utils.ml_normalizer(p, lang=LANGUAGE) for p in all_results["predictions"]]
+    norm_refs = [
+        data_utils.ml_normalizer(r, lang=LANGUAGE) for r in all_results["references"]
+    ]
+    norm_preds = [
+        data_utils.ml_normalizer(p, lang=LANGUAGE) for p in all_results["predictions"]
+    ]
     wer_refs, wer_preds = normalize_compound_pairs(norm_refs, norm_preds)
     wer = wer_metric.compute(references=wer_refs, predictions=wer_preds)
     wer = round(100 * wer, 2)
-    rtfx = round(sum(all_results["audio_length_s"]) / sum(all_results["transcription_time_s"]), 2)
+    rtfx = round(
+        sum(all_results["audio_length_s"]) / sum(all_results["transcription_time_s"]), 2
+    )
     print("WER:", wer, "%", "RTFx:", rtfx)
 
 

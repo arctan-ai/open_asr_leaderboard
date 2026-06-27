@@ -34,10 +34,10 @@ class OfflineZipformerTransducer:
     """Decode 16 kHz audio with an offline Icefall Zipformer transducer."""
 
     def __init__(self, args: argparse.Namespace) -> None:
-
         self.model_dir = Path(
             snapshot_download(
-                args.model_id, allow_patterns=("*.pt", "*.model", "*.yaml"),
+                args.model_id,
+                allow_patterns=("*.pt", "*.model", "*.yaml"),
             )
         ).resolve()
 
@@ -61,7 +61,9 @@ class OfflineZipformerTransducer:
 
         model_path = (self.model_dir / model_config["file"]).resolve()
         self.model = get_model(self.params)
-        state_dict = torch.load(model_path, map_location="cpu", weights_only=True)["model"]
+        state_dict = torch.load(model_path, map_location="cpu", weights_only=True)[
+            "model"
+        ]
 
         self.model.load_state_dict(state_dict, strict=True)
         self.model.to(self.device)
@@ -108,7 +110,6 @@ class OfflineZipformerTransducer:
         return torch.cat([features, pad], dim=0)
 
     def compute_features(self, audio) -> Any:
-
         audio = np.ascontiguousarray(audio)
 
         fbank = knf.OnlineFbank(self.fbank_opts)
@@ -157,6 +158,7 @@ def get_parser() -> argparse.ArgumentParser:
         help="Download/materialize the dataset instead of streaming it.",
     )
     parser.add_argument("--warmup_steps", type=int, default=1)
+    data_utils.add_audio_preprocessor_args(parser)
     return parser
 
 
@@ -192,7 +194,9 @@ def benchmark(
     ]
     batch["transcription_time_s"] = minibatch_size * [runtime / minibatch_size]
     batch["predictions"] = pred_text  # raw; normalization applied at scoring time
-    batch["references"] = batch["original_text"]  # raw; normalization applied at scoring time
+    batch["references"] = batch[
+        "original_text"
+    ]  # raw; normalization applied at scoring time
     return batch
 
 
@@ -201,7 +205,6 @@ def resample_audioop(
     sampling_rate: int,
     target_sampling_rate: int,
 ) -> np.typing.NDArray[np.float32]:
-
     audio = np.asarray(audio, dtype=np.float32)
 
     # Expected shape and dtype: (num_samples,), mono float32 audio in [-1.0, 1.0].
@@ -242,7 +245,9 @@ def main(args: argparse.Namespace) -> None:
 
     if args.warmup_steps is not None:
         warmup_dataset = data_utils.load_data(args)
-        warmup_dataset = data_utils.prepare_data(warmup_dataset, sampling_rate=None)
+        warmup_dataset = data_utils.prepare_data(
+            warmup_dataset, sampling_rate=None, args=args
+        )
         warmup_dataset = limit_dataset(
             warmup_dataset,
             args.warmup_steps * args.batch_size,
@@ -259,7 +264,7 @@ def main(args: argparse.Namespace) -> None:
 
     dataset = data_utils.load_data(args)
     dataset = limit_dataset(dataset, args.max_eval_samples, args.streaming)
-    dataset = data_utils.prepare_data(dataset, sampling_rate=None)
+    dataset = data_utils.prepare_data(dataset, sampling_rate=None, args=args)
     dataset = dataset.map(
         benchmark,
         batch_size=args.batch_size,

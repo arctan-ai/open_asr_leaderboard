@@ -20,13 +20,11 @@ def main(args):
     feature_extractor = AutoFeatureExtractor.from_pretrained(
         model_source, trust_remote_code=True
     ).cuda()
-    model = AutoModel.from_pretrained(
-        model_source, trust_remote_code=True
-    ).cuda()
-    print(f"Model size: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B parameters")
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_source, trust_remote_code=True
+    model = AutoModel.from_pretrained(model_source, trust_remote_code=True).cuda()
+    print(
+        f"Model size: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B parameters"
     )
+    tokenizer = AutoTokenizer.from_pretrained(model_source, trust_remote_code=True)
 
     def get_sub_batch_output(sub_batch):
         """Get output from model on sub batch."""
@@ -49,10 +47,14 @@ def main(args):
         # Load audio inputs
         audios = [audio["array"] for audio in batch["audio"]]
         minibatch_size = len(audios)
-        batch["audio_filepath"] = data_utils.extract_audio_filepaths_from_batch(batch, minibatch_size)
+        batch["audio_filepath"] = data_utils.extract_audio_filepaths_from_batch(
+            batch, minibatch_size
+        )
         sampling_rate = batch["audio"][0]["sampling_rate"]
         batch["audio_length_s"] = [len(audio) / sampling_rate for audio in audios]
-        batch["audio_filepath"] = data_utils.extract_audio_filepaths_from_batch(batch, minibatch_size)
+        batch["audio_filepath"] = data_utils.extract_audio_filepaths_from_batch(
+            batch, minibatch_size
+        )
 
         # START TIMING
         start_time = time.time()
@@ -104,12 +106,14 @@ def main(args):
         batch["transcription_time_s"] = minibatch_size * [runtime / minibatch_size]
 
         batch["predictions"] = pred_text  # raw; normalization applied at scoring time
-        batch["references"] = batch["original_text"]  # raw; normalization applied at scoring time
+        batch["references"] = batch[
+            "original_text"
+        ]  # raw; normalization applied at scoring time
         return batch
 
     if args.warmup_steps is not None:
         dataset = data_utils.load_data(args)
-        dataset = data_utils.prepare_data(dataset)
+        dataset = data_utils.prepare_data(dataset, args=args)
 
         num_warmup_samples = args.warmup_steps * args.batch_size
         if args.streaming:
@@ -132,7 +136,7 @@ def main(args):
             dataset = dataset.take(args.max_eval_samples)
         else:
             dataset = dataset.select(range(min(args.max_eval_samples, len(dataset))))
-    dataset = data_utils.prepare_data(dataset)
+    dataset = data_utils.prepare_data(dataset, args=args)
 
     dataset = dataset.map(
         benchmark,
@@ -169,9 +173,7 @@ def main(args):
 
     norm_refs = [data_utils.normalizer(r) for r in all_results["references"]]
     norm_preds = [data_utils.normalizer(p) for p in all_results["predictions"]]
-    wer = wer_metric.compute(
-        references=norm_refs, predictions=norm_preds
-    )
+    wer = wer_metric.compute(references=norm_refs, predictions=norm_preds)
     wer = round(100 * wer, 2)
     rtfx = round(
         sum(all_results["audio_length_s"]) / sum(all_results["transcription_time_s"]), 2
@@ -243,6 +245,8 @@ if __name__ == "__main__":
         default=None,
         help="Model revision to use (branch, tag, or commit hash). Defaults to the model's default revision.",
     )
+    data_utils.add_audio_preprocessor_args(parser)
+
     args = parser.parse_args()
 
     main(args)

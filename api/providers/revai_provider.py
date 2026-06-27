@@ -41,7 +41,9 @@ class RevAIProvider(APIProvider):
                 time.sleep(0.1)
                 continue
             elif job_details.status.name == "FAILED":
-                detail = getattr(job_details, "failure_detail", None) or "unknown reason"
+                detail = (
+                    getattr(job_details, "failure_detail", None) or "unknown reason"
+                )
                 raise PermanentError(f"RevAI transcription failed: {detail}")
             elif job_details.status.name == "TRANSCRIBED":
                 break

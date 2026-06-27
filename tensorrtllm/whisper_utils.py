@@ -134,12 +134,12 @@ LANGUAGES = {
     "yue": "cantonese",
 }
 
-def get_tokenizer(name: str = "multilingual",
-                  num_languages: int = 99,
-                  tokenizer_dir: str = None):
+
+def get_tokenizer(
+    name: str = "multilingual", num_languages: int = 99, tokenizer_dir: str = None
+):
     if tokenizer_dir is None:
-        vocab_path = os.path.join(os.path.dirname(__file__),
-                                  f"assets/{name}.tiktoken")
+        vocab_path = os.path.join(os.path.dirname(__file__), f"assets/{name}.tiktoken")
     else:
         vocab_path = os.path.join(tokenizer_dir, f"{name}.tiktoken")
     ranks = {
@@ -169,16 +169,14 @@ def get_tokenizer(name: str = "multilingual",
     return tiktoken.Encoding(
         name=os.path.basename(vocab_path),
         explicit_n_vocab=n_vocab,
-        pat_str=
-        r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""",
+        pat_str=r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""",
         mergeable_ranks=ranks,
         special_tokens=special_tokens,
     )
 
+
 @lru_cache(maxsize=None)
-def mel_filters(device,
-                n_mels: int,
-                mel_filters_dir: str = None) -> torch.Tensor:
+def mel_filters(device, n_mels: int, mel_filters_dir: str = None) -> torch.Tensor:
     """
     load the mel filterbank matrix for projecting STFT into a Mel spectrogram.
     Allows decoupling librosa dependency; saved using:
@@ -190,12 +188,14 @@ def mel_filters(device,
     """
     assert n_mels in {80, 128}, f"Unsupported n_mels: {n_mels}"
     if mel_filters_dir is None:
-        mel_filters_path = os.path.join(os.path.dirname(__file__), "assets",
-                                        "mel_filters.npz")
+        mel_filters_path = os.path.join(
+            os.path.dirname(__file__), "assets", "mel_filters.npz"
+        )
     else:
         mel_filters_path = os.path.join(mel_filters_dir, "mel_filters.npz")
     with np.load(mel_filters_path) as f:
         return torch.from_numpy(f[f"mel_{n_mels}"]).to(device)
+
 
 def log_mel_spectrogram(
     audio: Union[str, np.ndarray, torch.Tensor],
@@ -235,12 +235,8 @@ def log_mel_spectrogram(
         # pad to N_SAMPLES
         audio = F.pad(audio, (0, padding))
     window = torch.hann_window(N_FFT).to(audio.device)
-    stft = torch.stft(audio,
-                      N_FFT,
-                      HOP_LENGTH,
-                      window=window,
-                      return_complex=True)
-    magnitudes = stft[..., :-1].abs()**2
+    stft = torch.stft(audio, N_FFT, HOP_LENGTH, window=window, return_complex=True)
+    magnitudes = stft[..., :-1].abs() ** 2
 
     filters = mel_filters(audio.device, n_mels, mel_filters_dir)
     mel_spec = filters @ magnitudes

@@ -176,7 +176,9 @@ def transcribe_dataset(
             total=len(future_to_sample),
             desc="Transcribing",
         ):
-            reference, transcription, audio_duration, transcription_time = future.result()
+            reference, transcription, audio_duration, transcription_time = (
+                future.result()
+            )
             results["predictions"].append(transcription)
             results["references"].append(reference)
             results["audio_length_s"].append(audio_duration)
@@ -198,9 +200,7 @@ def transcribe_dataset(
     norm_refs = [data_utils.normalizer(r) or " " for r in results["references"]]
     norm_preds = [data_utils.normalizer(p) or " " for p in results["predictions"]]
     wer_metric = evaluate.load("wer")
-    wer = wer_metric.compute(
-        references=norm_refs, predictions=norm_preds
-    )
+    wer = wer_metric.compute(references=norm_refs, predictions=norm_preds)
     wer_percent = round(100 * wer, 2)
     rtfx = round(
         sum(results["audio_length_s"]) / sum(results["transcription_time_s"]), 2

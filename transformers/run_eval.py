@@ -59,7 +59,9 @@ def main(args):
     elif type(config) in MODEL_FOR_CTC_MAPPING:
         cls_model = AutoModelForCTC
     else:
-        raise ValueError(f"Model config of type {type(config)} not recognized in Transformers mappings.")
+        raise ValueError(
+            f"Model config of type {type(config)} not recognized in Transformers mappings."
+        )
     is_ctc = cls_model == AutoModelForCTC
 
     if "vibevoice" in args.model_id.lower():
@@ -81,12 +83,18 @@ def main(args):
         )
     model.to(args.device)
     model.eval()
-    print(f"Model size: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B parameters")
+    print(
+        f"Model size: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B parameters"
+    )
     processor = AutoProcessor.from_pretrained(args.model_id, revision=args.revision)
     has_transcription_processor = hasattr(processor, "apply_transcription_request")
-    is_cohere = "cohere" in args.model_id.lower() and "transcribe" in args.model_id.lower()
+    is_cohere = (
+        "cohere" in args.model_id.lower() and "transcribe" in args.model_id.lower()
+    )
     # Voxtral Realtime uses a simple processor call (no apply_transcription_request / prompt)
-    is_voxtral_realtime = "voxtral" in args.model_id.lower() and "realtime" in args.model_id.lower()
+    is_voxtral_realtime = (
+        "voxtral" in args.model_id.lower() and "realtime" in args.model_id.lower()
+    )
     is_qwen3_asr = "qwen3-asr" in args.model_id.lower()
 
     # Optional prompt for audio language models, newer models should use `apply_transcription_request`
@@ -104,12 +112,19 @@ def main(args):
             },
         ]
 
-        text = processor.apply_chat_template(chat, tokenize=False, add_generation_prompt=True)
+        text = processor.apply_chat_template(
+            chat, tokenize=False, add_generation_prompt=True
+        )
 
     # Extract sampling rate
-    if hasattr(processor, "feature_extractor") and processor.feature_extractor is not None:
+    if (
+        hasattr(processor, "feature_extractor")
+        and processor.feature_extractor is not None
+    ):
         sampling_rate = processor.feature_extractor.sampling_rate
-    elif hasattr(processor, "audio_processor") and processor.audio_processor is not None:
+    elif (
+        hasattr(processor, "audio_processor") and processor.audio_processor is not None
+    ):
         sampling_rate = processor.audio_processor.sampling_rate
     else:
         sampling_rate = 16_000
@@ -132,15 +147,21 @@ def main(args):
         if "granite-speech-3.3" in args.model_id.lower():
             gen_kwargs["repetition_penalty"] = 1.0
     elif args.max_new_tokens:
-        raise ValueError("`max_new_tokens` should only be set for auto-regressive models, but got a CTC model.")
+        raise ValueError(
+            "`max_new_tokens` should only be set for auto-regressive models, but got a CTC model."
+        )
 
     if args.torch_compile is not None:
         if model.can_generate():
-            gen_kwargs["compile_config"] = CompileConfig(mode=args.torch_compile, fullgraph=args.compile_fullgraph)
+            gen_kwargs["compile_config"] = CompileConfig(
+                mode=args.torch_compile, fullgraph=args.compile_fullgraph
+            )
             # enable static k/v cache for autoregressive models
             model.generation_config.cache_implementation = "static"
         else:
-            model = torch.compile(model, mode=args.torch_compile, fullgraph=args.compile_fullgraph)
+            model = torch.compile(
+                model, mode=args.torch_compile, fullgraph=args.compile_fullgraph
+            )
 
         # Ensure warm-up runs when using torch.compile
         if args.warmup_steps is None or args.warmup_steps < 1:
@@ -155,7 +176,9 @@ def main(args):
         minibatch_size = len(audios)
         sampling_rate = batch["audio"][0]["sampling_rate"]
         batch["audio_length_s"] = [len(audio) / sampling_rate for audio in audios]
-        batch["audio_filepath"] = data_utils.extract_audio_filepaths_from_batch(batch, minibatch_size)
+        batch["audio_filepath"] = data_utils.extract_audio_filepaths_from_batch(
+            batch, minibatch_size
+        )
         if text is not None:
             texts = [text] * minibatch_size
         else:
@@ -210,7 +233,9 @@ def main(args):
                 return_tensors="pt",
             ).to(args.device)
             prompt_len = inputs["input_ids"].shape[1]
-        elif not model.can_generate():  # or len(audios[0]) > processor.feature_extractor.n_samples:
+        elif (
+            not model.can_generate()
+        ):  # or len(audios[0]) > processor.feature_extractor.n_samples:
             # 1.2 Either CTC pre-processing (normalize to mean 0, std 1), or long-form Whisper processing
             inputs = processor(
                 audios,
@@ -247,7 +272,11 @@ def main(args):
         if args.torch_compile is not None:
             sdpa_backends = [SDPBackend.MATH]
         else:
-            sdpa_backends = [SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]
+            sdpa_backends = [
+                SDPBackend.FLASH_ATTENTION,
+                SDPBackend.EFFICIENT_ATTENTION,
+                SDPBackend.MATH,
+            ]
         with sdpa_kernel(sdpa_backends):
             if model.can_generate():
                 # 2.1 Auto-regressive generation for LM-based models
@@ -258,19 +287,34 @@ def main(args):
                     # Compute per-sample limits (6.5 tokens/sec + 2 for <sot>/<eot>),
                     # generate up to the batch maximum, then mask out tokens beyond each
                     # sample's individual limit by replacing them with the EOT token.
-                    token_limits = [int(len(clip) * 6.5 // 16000 + 2) for clip in audios]
-                    per_sample_limits = torch.tensor(token_limits).reshape(-1, 1).to(args.device)
-                    moonshine_gen_kwargs = {**gen_kwargs, "max_new_tokens": per_sample_limits.max().item()}
+                    token_limits = [
+                        int(len(clip) * 6.5 // 16000 + 2) for clip in audios
+                    ]
+                    per_sample_limits = (
+                        torch.tensor(token_limits).reshape(-1, 1).to(args.device)
+                    )
+                    moonshine_gen_kwargs = {
+                        **gen_kwargs,
+                        "max_new_tokens": per_sample_limits.max().item(),
+                    }
                     pred_ids = model.generate(**inputs, **moonshine_gen_kwargs)
                     output_mask = (
-                        torch.arange(pred_ids.shape[-1], device=args.device).unsqueeze(0).expand(pred_ids.shape[0], -1)
+                        torch.arange(pred_ids.shape[-1], device=args.device)
+                        .unsqueeze(0)
+                        .expand(pred_ids.shape[0], -1)
                         > per_sample_limits
                     )
-                    pred_ids = pred_ids.masked_fill(output_mask, model.config.eos_token_id)
+                    pred_ids = pred_ids.masked_fill(
+                        output_mask, model.config.eos_token_id
+                    )
                 elif args.longform:
-                    pred_ids = model.generate(**inputs, **gen_kwargs, return_timestamps=True)
+                    pred_ids = model.generate(
+                        **inputs, **gen_kwargs, return_timestamps=True
+                    )
                 else:
-                    pred_ids = model.generate(**inputs, **gen_kwargs, min_new_tokens=min_new_tokens)
+                    pred_ids = model.generate(
+                        **inputs, **gen_kwargs, min_new_tokens=min_new_tokens
+                    )
             else:
                 # 2.2. Single forward pass for CTC
                 with torch.no_grad():
@@ -296,26 +340,40 @@ def main(args):
             # VibeVoice: strip the input prompt tokens then use the model's own decode API
             generated_ids = pred_ids[:, prompt_len:]
             try:
-                pred_text = processor.decode(generated_ids, return_format="transcription_only")
+                pred_text = processor.decode(
+                    generated_ids, return_format="transcription_only"
+                )
             except Exception as e:
-                print(f"Batch decoding failed with error: {e}. Falling back to individual sample decoding.")
+                print(
+                    f"Batch decoding failed with error: {e}. Falling back to individual sample decoding."
+                )
                 pred_text = []
                 for i, sample_ids in enumerate(generated_ids):
                     try:
-                        decoded = processor.decode(sample_ids.unsqueeze(0), return_format="transcription_only")
-                        pred_text.append(decoded[0] if isinstance(decoded, list) else decoded)
+                        decoded = processor.decode(
+                            sample_ids.unsqueeze(0), return_format="transcription_only"
+                        )
+                        pred_text.append(
+                            decoded[0] if isinstance(decoded, list) else decoded
+                        )
                     except Exception as sample_error:
-                        print(f"Sample {i} decoding failed with error: {sample_error}. Setting to empty transcript.")
+                        print(
+                            f"Sample {i} decoding failed with error: {sample_error}. Setting to empty transcript."
+                        )
                         pred_text.append("")
         elif is_voxtral_realtime:
             # No prompt tokens to strip — decode directly
             pred_text = processor.batch_decode(pred_ids, skip_special_tokens=True)
         elif is_qwen3_asr:
             # Use Qwen3 ASR's structured decode to extract transcription text
-            pred_text = processor.decode(pred_ids[:, prompt_len:], return_format="transcription_only")
+            pred_text = processor.decode(
+                pred_ids[:, prompt_len:], return_format="transcription_only"
+            )
         elif has_transcription_processor or texts is not None:
             # Strip input prompt tokens
-            pred_text = processor.decode(pred_ids[:, prompt_len:], skip_special_tokens=True)
+            pred_text = processor.decode(
+                pred_ids[:, prompt_len:], skip_special_tokens=True
+            )
         elif is_ctc:
             # don't use skip_special_tokens as it collapses double letters
             pred_text = processor.batch_decode(pred_ids)
@@ -331,21 +389,30 @@ def main(args):
         batch["transcription_time_s"] = minibatch_size * [runtime / minibatch_size]
 
         batch["predictions"] = pred_text  # raw; normalization applied at scoring time
-        batch["references"] = batch["original_text"]  # raw; normalization applied at scoring time
+        batch["references"] = batch[
+            "original_text"
+        ]  # raw; normalization applied at scoring time
         return batch
 
     if args.warmup_steps is not None:
         dataset = data_utils.load_data(args)
-        dataset = data_utils.prepare_data(dataset, sampling_rate=sampling_rate)
+        dataset = data_utils.prepare_data(
+            dataset, sampling_rate=sampling_rate, args=args
+        )
 
         num_warmup_samples = args.warmup_steps * args.batch_size
         if args.streaming:
             warmup_dataset = dataset.take(num_warmup_samples)
         else:
-            warmup_dataset = dataset.select(range(min(num_warmup_samples, len(dataset))))
+            warmup_dataset = dataset.select(
+                range(min(num_warmup_samples, len(dataset)))
+            )
         warmup_dataset = iter(
             warmup_dataset.map(
-                benchmark, batch_size=args.batch_size, batched=True, fn_kwargs={"min_new_tokens": args.max_new_tokens}
+                benchmark,
+                batch_size=args.batch_size,
+                batched=True,
+                fn_kwargs={"min_new_tokens": args.max_new_tokens},
             )
         )
 
@@ -359,7 +426,7 @@ def main(args):
             dataset = dataset.take(args.max_eval_samples)
         else:
             dataset = dataset.select(range(min(args.max_eval_samples, len(dataset))))
-    dataset = data_utils.prepare_data(dataset, sampling_rate=sampling_rate)
+    dataset = data_utils.prepare_data(dataset, sampling_rate=sampling_rate, args=args)
 
     dataset = dataset.map(
         benchmark,
@@ -399,7 +466,9 @@ def main(args):
     norm_preds = [data_utils.normalizer(p) for p in all_results["predictions"]]
     wer = wer_metric.compute(references=norm_refs, predictions=norm_preds)
     wer = round(100 * wer, 2)
-    rtfx = round(sum(all_results["audio_length_s"]) / sum(all_results["transcription_time_s"]), 2)
+    rtfx = round(
+        sum(all_results["audio_length_s"]) / sum(all_results["transcription_time_s"]), 2
+    )
     print("WER:", wer, "%", "RTFx:", rtfx)
 
 
@@ -500,10 +569,14 @@ if __name__ == "__main__":
         default=None,
         help="Model revision to use (e.g. 'refs/pr/11' for a PR branch). Defaults to the main branch.",
     )
+    data_utils.add_audio_preprocessor_args(parser)
+
     args = parser.parse_args()
 
     print("*" * 100)
-    print(f"Evaluating {args.model_id} on {args.dataset_path} / {args.dataset} / {args.split}")
+    print(
+        f"Evaluating {args.model_id} on {args.dataset_path} / {args.dataset} / {args.split}"
+    )
     print("*" * 100)
 
     main(args)

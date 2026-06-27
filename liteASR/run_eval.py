@@ -2,28 +2,48 @@ import argparse
 import os
 import torch
 from torch.nn.attention import sdpa_kernel, SDPBackend
-from transformers import AutoConfig, AutoModel, AutoModelForCTC, AutoProcessor, MODEL_FOR_SPEECH_SEQ_2_SEQ_MAPPING
+from transformers import (
+    AutoConfig,
+    AutoModel,
+    AutoModelForCTC,
+    AutoProcessor,
+    MODEL_FOR_SPEECH_SEQ_2_SEQ_MAPPING,
+)
 import evaluate
 from normalizer import data_utils
 import time
 from tqdm import tqdm
 
 wer_metric = evaluate.load("wer")
-torch.set_float32_matmul_precision('high')
+torch.set_float32_matmul_precision("high")
+
 
 def main(args):
-    model = AutoModel.from_pretrained(args.model_id, torch_dtype=torch.float16, trust_remote_code=True, force_download=True).to(args.device)
-    print(f"Model size: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B parameters")
-    processor = AutoProcessor.from_pretrained("openai/whisper-large-v3-turbo", force_download=True)
+    model = AutoModel.from_pretrained(
+        args.model_id,
+        torch_dtype=torch.float16,
+        trust_remote_code=True,
+        force_download=True,
+    ).to(args.device)
+    print(
+        f"Model size: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B parameters"
+    )
+    processor = AutoProcessor.from_pretrained(
+        "openai/whisper-large-v3-turbo", force_download=True
+    )
     model_input_name = processor.model_input_names[0]
 
     if model.can_generate():
         gen_kwargs = {"max_new_tokens": 224}
     elif args.max_new_tokens:
-        raise ValueError("`max_new_tokens` should only be set for auto-regressive models, but got a CTC model.")
+        raise ValueError(
+            "`max_new_tokens` should only be set for auto-regressive models, but got a CTC model."
+        )
 
     if args.torch_compile:
-        model.forward = torch.compile(model.forward, mode=args.compile_mode, fullgraph=True)
+        model.forward = torch.compile(
+            model.forward, mode=args.compile_mode, fullgraph=True
+        )
         if model.can_generate():
             # enable static k/v cache for autoregressive models
             model.generation_config.cache_implementation = "static"
@@ -33,7 +53,9 @@ def main(args):
         audios = [audio["array"] for audio in batch["audio"]]
         minibatch_size = len(audios)
         batch["audio_length_s"] = [len(audio) / 16000 for audio in audios]
-        batch["audio_filepath"] = data_utils.extract_audio_filepaths_from_batch(batch, minibatch_size)
+        batch["audio_filepath"] = data_utils.extract_audio_filepaths_from_batch(
+            batch, minibatch_size
+        )
 
         # START TIMING
         start_time = time.time()
@@ -46,7 +68,9 @@ def main(args):
             padding_audios = [audios[-1] for _ in range(padding_size)]
             audios.extend(padding_audios)
 
-        if not model.can_generate(): #or len(audios[0]) > processor.feature_extractor.n_samples:
+        if (
+            not model.can_generate()
+        ):  # or len(audios[0]) > processor.feature_extractor.n_samples:
             # 1.2 Either CTC pre-processing (normalize to mean 0, std 1), or long-form Whisper processing
             inputs = processor(
                 audios,
@@ -58,19 +82,27 @@ def main(args):
             )
         else:
             # 1.3 Standard Whisper processing: pad audios to 30-seconds and converted to log-mel
-            inputs = processor(audios, sampling_rate=16_000, return_tensors="pt", device=args.device)
+            inputs = processor(
+                audios, sampling_rate=16_000, return_tensors="pt", device=args.device
+            )
 
         inputs = inputs.to(args.device)
         inputs[model_input_name] = inputs[model_input_name].to(torch.float16)
 
         # 2. Model Inference
-        with sdpa_kernel(SDPBackend.MATH if args.torch_compile else SDPBackend.FLASH_ATTENTION):
-            forced_decoder_ids = processor.get_decoder_prompt_ids(language="english", task="transcribe")
+        with sdpa_kernel(
+            SDPBackend.MATH if args.torch_compile else SDPBackend.FLASH_ATTENTION
+        ):
+            forced_decoder_ids = processor.get_decoder_prompt_ids(
+                language="english", task="transcribe"
+            )
             if model.can_generate():
                 # 2.1 Auto-regressive generation for encoder-decoder models
                 # Set forced_decoder_ids on generation_config (not as kwarg) for newer transformers
                 model.generation_config.forced_decoder_ids = forced_decoder_ids
-                pred_ids = model.generate(**inputs, **gen_kwargs, min_new_tokens=min_new_tokens)
+                pred_ids = model.generate(
+                    **inputs, **gen_kwargs, min_new_tokens=min_new_tokens
+                )
             else:
                 # 2.2. Single forward pass for CTC
                 with torch.no_grad():
@@ -97,14 +129,23 @@ def main(args):
 
     if args.warmup_steps is not None:
         dataset = data_utils.load_data(args)
-        dataset = data_utils.prepare_data(dataset)
+        dataset = data_utils.prepare_data(dataset, args=args)
 
         num_warmup_samples = args.warmup_steps * args.batch_size
         if args.streaming:
             warmup_dataset = dataset.take(num_warmup_samples)
         else:
-            warmup_dataset = dataset.select(range(min(num_warmup_samples, len(dataset))))
-        warmup_dataset = iter(warmup_dataset.map(benchmark, batch_size=args.batch_size, batched=True, fn_kwargs={"min_new_tokens": args.max_new_tokens}))
+            warmup_dataset = dataset.select(
+                range(min(num_warmup_samples, len(dataset)))
+            )
+        warmup_dataset = iter(
+            warmup_dataset.map(
+                benchmark,
+                batch_size=args.batch_size,
+                batched=True,
+                fn_kwargs={"min_new_tokens": args.max_new_tokens},
+            )
+        )
 
         for _ in tqdm(warmup_dataset, desc="Warming up..."):
             continue
@@ -116,10 +157,13 @@ def main(args):
             dataset = dataset.take(args.max_eval_samples)
         else:
             dataset = dataset.select(range(min(args.max_eval_samples, len(dataset))))
-    dataset = data_utils.prepare_data(dataset)
+    dataset = data_utils.prepare_data(dataset, args=args)
 
     dataset = dataset.map(
-        benchmark, batch_size=args.batch_size, batched=True, remove_columns=["audio"],
+        benchmark,
+        batch_size=args.batch_size,
+        batched=True,
+        remove_columns=["audio"],
     )
 
     all_results = {
@@ -150,11 +194,11 @@ def main(args):
 
     norm_refs = [data_utils.normalizer(r) for r in all_results["references"]]
     norm_preds = [data_utils.normalizer(p) for p in all_results["predictions"]]
-    wer = wer_metric.compute(
-        references=norm_refs, predictions=norm_preds
-    )
+    wer = wer_metric.compute(references=norm_refs, predictions=norm_preds)
     wer = round(100 * wer, 2)
-    rtfx = round(sum(all_results["audio_length_s"]) / sum(all_results["transcription_time_s"]), 2)
+    rtfx = round(
+        sum(all_results["audio_length_s"]) / sum(all_results["transcription_time_s"]), 2
+    )
     print("WER:", wer, "%", "RTFx:", rtfx)
 
 
@@ -232,6 +276,8 @@ if __name__ == "__main__":
         default=10,
         help="Number of warm-up steps to run before launching the timed runs.",
     )
+    data_utils.add_audio_preprocessor_args(parser)
+
     args = parser.parse_args()
 
     main(args)

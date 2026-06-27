@@ -65,8 +65,8 @@ def main():
         default=None,
         metavar="MODEL_ID",
         help="Score only this model (can be repeated for multiple models). "
-             "E.g. --model_id zoom/scribe_v1 --model_id assembly/universal-3-pro. "
-             "Defaults to scoring all models.",
+        "E.g. --model_id zoom/scribe_v1 --model_id assembly/universal-3-pro. "
+        "Defaults to scoring all models.",
     )
     args = parser.parse_args()
 

@@ -127,8 +127,20 @@ def write_manifest(
     )
 
     with open(manifest_path, "w", encoding="utf-8") as f:
-        for idx, (text, transcript, audio_length, transcription_time, audio_filepath) in enumerate(
-            zip(references, transcriptions, audio_length, transcription_time, audio_filepaths)
+        for idx, (
+            text,
+            transcript,
+            audio_length,
+            transcription_time,
+            audio_filepath,
+        ) in enumerate(
+            zip(
+                references,
+                transcriptions,
+                audio_length,
+                transcription_time,
+                audio_filepaths,
+            )
         ):
             datum = {
                 "audio_filepath": audio_filepath if audio_filepath else f"sample_{idx}",
@@ -141,7 +153,13 @@ def write_manifest(
     return manifest_path
 
 
-def score_results(directory: str, model_id: str = None, multilingual: bool = False, csv_only: bool = False, language: str = "en"):
+def score_results(
+    directory: str,
+    model_id: str = None,
+    multilingual: bool = False,
+    csv_only: bool = False,
+    language: str = "en",
+):
     """
     Scores all result files in a directory and returns a composite score over all evaluated datasets.
 
@@ -172,7 +190,8 @@ def score_results(directory: str, model_id: str = None, multilingual: bool = Fal
         print("Filtering models by id:", model_id)
         model_id = model_id.replace("/", "-")
         result_files = [
-            fp for fp in result_files
+            fp
+            for fp in result_files
             if f"/{model_id}/" in fp or f"MODEL_{model_id}_DATASET_" in fp
         ]
 
@@ -195,6 +214,7 @@ def score_results(directory: str, model_id: str = None, multilingual: bool = Fal
 
     # Compute WER results per dataset, and RTFx over all datasets
     from normalizer import data_utils  # deferred to avoid circular import
+
     results = {}
     wer_metric = None  # loaded lazily only when multilingual=True
 
@@ -217,6 +237,7 @@ def score_results(directory: str, model_id: str = None, multilingual: bool = Fal
             # TODO update to use kaldialign
             if wer_metric is None:
                 import evaluate
+
                 wer_metric = evaluate.load("wer")
             references, predictions = normalize_compound_pairs(references, predictions)
             wer = wer_metric.compute(references=references, predictions=predictions)
@@ -224,7 +245,7 @@ def score_results(directory: str, model_id: str = None, multilingual: bool = Fal
             # Use kaldialign batch_error_rate with merge_compounds=True so that
             # split compounds (e.g. "white paper" vs "whitepaper") count as
             # 0 errors in either direction.
-            refs_split  = [tuple(r.split()) for r in references]
+            refs_split = [tuple(r.split()) for r in references]
             preds_split = [tuple(p.split()) for p in predictions]
             r = batch_error_rate(refs_split, preds_split, merge_compounds=True)
             total_ins, total_del, total_sub = r["ins"], r["del"], r["sub"]
@@ -240,8 +261,18 @@ def score_results(directory: str, model_id: str = None, multilingual: bool = Fal
             audio_length = inference_time = rtfx = None
 
         result_key = f"{model_id_of_file} | {dataset_id}"
-        extra = {"ins": total_ins, "del": total_del, "sub": total_sub} if not multilingual else {}
-        results[result_key] = {"wer": wer, "audio_length": audio_length, "inference_time": inference_time, "rtfx": rtfx, **extra}
+        extra = (
+            {"ins": total_ins, "del": total_del, "sub": total_sub}
+            if not multilingual
+            else {}
+        )
+        results[result_key] = {
+            "wer": wer,
+            "audio_length": audio_length,
+            "inference_time": inference_time,
+            "rtfx": rtfx,
+            **extra,
+        }
 
     if not csv_only:
         print("*" * 80)
@@ -295,13 +326,22 @@ def score_results(directory: str, model_id: str = None, multilingual: bool = Fal
             "Scripted-US,Scripted-AU,Scripted-CA,Scripted-IN,"
             "Conversational-US003,Conversational-US004,Conversational-IN",
             {
-                "appen_scripted_filtered__american":                     ("Scripted-US",          "scripted"),
-                "appen_scripted_filtered__australian":                   ("Scripted-AU",          "scripted"),
-                "appen_scripted_filtered__canadian":                     ("Scripted-CA",          "scripted"),
-                "appen_scripted_filtered__indian":                       ("Scripted-IN",          "scripted"),
-                "appen_conversational_segmented_filtered__american_003": ("Conversational-US003", "conversational"),
-                "appen_conversational_segmented_filtered__american_004": ("Conversational-US004", "conversational"),
-                "appen_conversational_segmented_filtered__indian":       ("Conversational-IN",    "conversational"),
+                "appen_scripted_filtered__american": ("Scripted-US", "scripted"),
+                "appen_scripted_filtered__australian": ("Scripted-AU", "scripted"),
+                "appen_scripted_filtered__canadian": ("Scripted-CA", "scripted"),
+                "appen_scripted_filtered__indian": ("Scripted-IN", "scripted"),
+                "appen_conversational_segmented_filtered__american_003": (
+                    "Conversational-US003",
+                    "conversational",
+                ),
+                "appen_conversational_segmented_filtered__american_004": (
+                    "Conversational-US004",
+                    "conversational",
+                ),
+                "appen_conversational_segmented_filtered__indian": (
+                    "Conversational-IN",
+                    "conversational",
+                ),
             },
         ),
         (
@@ -310,25 +350,31 @@ def score_results(directory: str, model_id: str = None, multilingual: bool = Fal
             "model,Avg DataOcean WER,Avg Scripted,Avg Conversational,"
             "Scripted-US,Scripted-GB,Conversational-US,Conversational-GB",
             {
-                "dataocean_scripted_filtered__en_US":                  ("Scripted-US",       "scripted"),
-                "dataocean_scripted_filtered__en_GB":                  ("Scripted-GB",       "scripted"),
-                "dataocean_conversational_segmented_filtered__en_US":  ("Conversational-US", "conversational"),
-                "dataocean_conversational_segmented_filtered__en_GB":  ("Conversational-GB", "conversational"),
+                "dataocean_scripted_filtered__en_US": ("Scripted-US", "scripted"),
+                "dataocean_scripted_filtered__en_GB": ("Scripted-GB", "scripted"),
+                "dataocean_conversational_segmented_filtered__en_US": (
+                    "Conversational-US",
+                    "conversational",
+                ),
+                "dataocean_conversational_segmented_filtered__en_GB": (
+                    "Conversational-GB",
+                    "conversational",
+                ),
             },
         ),
         (
             "public",
-            None,   # always printed when public datasets are present
+            None,  # always printed when public datasets are present
             "model,RTFx,License,Size (B),# Languages,Encoder,Decoder,"
             "AMI WER,Earnings22 WER,Gigaspeech WER,LS Clean WER,LS Other WER,SPGISpeech WER,Voxpopuli WER",
             {
-                "ami_test":               ("AMI WER",        None),
-                "earnings22_test":        ("Earnings22 WER", None),
-                "gigaspeech_test":        ("Gigaspeech WER", None),
-                "librispeech_test.clean": ("LS Clean WER",   None),
-                "librispeech_test.other": ("LS Other WER",   None),
-                "spgispeech_test":        ("SPGISpeech WER", None),
-                "voxpopuli_test":         ("Voxpopuli WER",  None),
+                "ami_test": ("AMI WER", None),
+                "earnings22_test": ("Earnings22 WER", None),
+                "gigaspeech_test": ("Gigaspeech WER", None),
+                "librispeech_test.clean": ("LS Clean WER", None),
+                "librispeech_test.other": ("LS Other WER", None),
+                "spgispeech_test": ("SPGISpeech WER", None),
+                "voxpopuli_test": ("Voxpopuli WER", None),
             },
         ),
         (
@@ -369,43 +415,79 @@ def score_results(directory: str, model_id: str = None, multilingual: bool = Fal
                 wer_vals = [v for v in wer_vals if v is not None]
                 if wer_vals:
                     avg = round(sum(wer_vals) / len(wer_vals), 2)
-                    label = original_model_id if original_model_id is not None else model_key.strip()
+                    label = (
+                        original_model_id
+                        if original_model_id is not None
+                        else model_key.strip()
+                    )
                     print(f"avg WER ({label}) = {avg}")
 
         print(header)
 
         for model_key in composite_wer:
-            csv_model_label = original_model_id if original_model_id is not None else model_key
-            wer_vals = {col: find_wer_in(model_key, col, col_map) for col in csv_columns}
-            wer_cols = [str(wer_vals[col]) if wer_vals[col] is not None else "" for col in csv_columns]
+            csv_model_label = (
+                original_model_id if original_model_id is not None else model_key
+            )
+            wer_vals = {
+                col: find_wer_in(model_key, col, col_map) for col in csv_columns
+            }
+            wer_cols = [
+                str(wer_vals[col]) if wer_vals[col] is not None else ""
+                for col in csv_columns
+            ]
 
             is_private = any(grp is not None for _lbl, grp in col_map.values())
             if is_private:
-                scripted_wers       = [v for _ds, (lbl, grp) in col_map.items()
-                                        if grp == "scripted"       and (v := wer_vals.get(lbl)) is not None]
-                conversational_wers = [v for _ds, (lbl, grp) in col_map.items()
-                                        if grp == "conversational" and (v := wer_vals.get(lbl)) is not None]
-                all_wers            = [v for v in wer_vals.values() if v is not None]
-                avg_overall        = round(sum(all_wers) / len(all_wers), 2)            if all_wers else ""
-                avg_scripted       = round(sum(scripted_wers) / len(scripted_wers), 2)  if scripted_wers else ""
-                avg_conv           = round(sum(conversational_wers) / len(conversational_wers), 2) if conversational_wers else ""
-                print(f"{csv_model_label},{avg_overall},{avg_scripted},{avg_conv}," + ",".join(wer_cols))
+                scripted_wers = [
+                    v
+                    for _ds, (lbl, grp) in col_map.items()
+                    if grp == "scripted" and (v := wer_vals.get(lbl)) is not None
+                ]
+                conversational_wers = [
+                    v
+                    for _ds, (lbl, grp) in col_map.items()
+                    if grp == "conversational" and (v := wer_vals.get(lbl)) is not None
+                ]
+                all_wers = [v for v in wer_vals.values() if v is not None]
+                avg_overall = (
+                    round(sum(all_wers) / len(all_wers), 2) if all_wers else ""
+                )
+                avg_scripted = (
+                    round(sum(scripted_wers) / len(scripted_wers), 2)
+                    if scripted_wers
+                    else ""
+                )
+                avg_conv = (
+                    round(sum(conversational_wers) / len(conversational_wers), 2)
+                    if conversational_wers
+                    else ""
+                )
+                print(
+                    f"{csv_model_label},{avg_overall},{avg_scripted},{avg_conv},"
+                    + ",".join(wer_cols)
+                )
             else:
-                n_prefix = len(header.split(',')) - 1 - len(csv_columns)
+                n_prefix = len(header.split(",")) - 1 - len(csv_columns)
                 if family_key == "public":
                     family_audio = sum(
                         results[rk]["audio_length"]
                         for ds_substr in col_map
                         for rk in results
-                        if model_key.rstrip() in rk and ds_substr in rk and results[rk]["audio_length"] is not None
+                        if model_key.rstrip() in rk
+                        and ds_substr in rk
+                        and results[rk]["audio_length"] is not None
                     )
                     family_time = sum(
                         results[rk]["inference_time"]
                         for ds_substr in col_map
                         for rk in results
-                        if model_key.rstrip() in rk and ds_substr in rk and results[rk]["inference_time"] is not None
+                        if model_key.rstrip() in rk
+                        and ds_substr in rk
+                        and results[rk]["inference_time"] is not None
                     )
-                    rtfx_val = round(family_audio / family_time, 2) if family_time else ""
+                    rtfx_val = (
+                        round(family_audio / family_time, 2) if family_time else ""
+                    )
                     prefix_cols = [str(rtfx_val)] + [""] * (n_prefix - 1)
                 else:
                     prefix_cols = [""] * n_prefix

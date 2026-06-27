@@ -1,4 +1,5 @@
-"""Run evaluation for ctranslate2 whisper models."""""
+"""Run evaluation for ctranslate2 whisper models.""" ""
+
 import argparse
 import os
 import time
@@ -18,7 +19,7 @@ def main(args) -> None:
         model_size_or_path=args.model_id,
         compute_type="float16",
         device="cuda",
-        device_index=args.device
+        device_index=args.device,
     )
 
     def benchmark(batch):
@@ -26,13 +27,17 @@ def main(args) -> None:
         segments, _ = asr_model.transcribe(batch["audio"]["array"], language="en")
         outputs = [segment._asdict() for segment in segments]
         batch["transcription_time_s"] = time.time() - start_time
-        batch["predictions"] = "".join([segment["text"] for segment in outputs]).strip()  # raw; normalization applied at scoring time
-        batch["references"] = batch["original_text"]  # raw; normalization applied at scoring time
+        batch["predictions"] = "".join(
+            [segment["text"] for segment in outputs]
+        ).strip()  # raw; normalization applied at scoring time
+        batch["references"] = batch[
+            "original_text"
+        ]  # raw; normalization applied at scoring time
         return batch
 
     if args.warmup_steps is not None:
         dataset = data_utils.load_data(args)
-        dataset = data_utils.prepare_data(dataset)
+        dataset = data_utils.prepare_data(dataset, args=args)
 
         if args.streaming:
             warmup_dataset = dataset.take(args.warmup_steps)
@@ -50,7 +55,7 @@ def main(args) -> None:
             dataset = dataset.take(args.max_eval_samples)
         else:
             dataset = dataset.select(range(min(args.max_eval_samples, len(dataset))))
-    dataset = data_utils.prepare_data(dataset)
+    dataset = data_utils.prepare_data(dataset, args=args)
 
     dataset = dataset.map(benchmark, remove_columns=["audio"])
 
@@ -80,11 +85,11 @@ def main(args) -> None:
 
     norm_refs = [data_utils.normalizer(r) for r in all_results["references"]]
     norm_preds = [data_utils.normalizer(p) for p in all_results["predictions"]]
-    wer = wer_metric.compute(
-        references=norm_refs, predictions=norm_preds
-    )
+    wer = wer_metric.compute(references=norm_refs, predictions=norm_preds)
     wer = round(100 * wer, 2)
-    rtfx = round(sum(all_results["audio_length_s"]) / sum(all_results["transcription_time_s"]), 2)
+    rtfx = round(
+        sum(all_results["audio_length_s"]) / sum(all_results["transcription_time_s"]), 2
+    )
     print("WER:", wer, "%", "RTFx:", rtfx)
 
 
@@ -98,14 +103,17 @@ if __name__ == "__main__":
         help="Model identifier. Should be loadable with faster-whisper",
     )
     parser.add_argument(
-        '--dataset_path', type=str, default='hf-audio/open-asr-leaderboard', help='Dataset path. By default, it is `hf-audio/open-asr-leaderboard`'
+        "--dataset_path",
+        type=str,
+        default="hf-audio/open-asr-leaderboard",
+        help="Dataset path. By default, it is `hf-audio/open-asr-leaderboard`",
     )
     parser.add_argument(
         "--dataset",
         type=str,
         required=True,
         help="Dataset name. *E.g.* `'librispeech_asr` for the LibriSpeech ASR dataset, or `'common_voice'` for Common Voice. The full list of dataset names "
-            "can be found at `https://huggingface.co/datasets/hf-audio/open-asr-leaderboard`"
+        "can be found at `https://huggingface.co/datasets/hf-audio/open-asr-leaderboard`",
     )
     parser.add_argument(
         "--split",
@@ -136,6 +144,8 @@ if __name__ == "__main__":
         default=5,
         help="Number of warm-up steps to run before launching the timed runs.",
     )
+    data_utils.add_audio_preprocessor_args(parser)
+
     args = parser.parse_args()
 
     main(args)

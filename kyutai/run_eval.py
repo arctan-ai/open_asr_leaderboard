@@ -13,7 +13,6 @@ torch.set_float32_matmul_precision("high")
 
 
 def load_model(model_path):
-
     info = models.loaders.CheckpointInfo.from_hf_repo(model_path)
 
     mimi = info.get_mimi(device="cuda")
@@ -82,7 +81,9 @@ def main(args):
         audio_silence_prefix_seconds,
         audio_delay_seconds,
     ) = load_model(args.model_id)
-    print(f"Model size: {sum(p.numel() for p in _lm.parameters()) / 1e9:.2f}B parameters")
+    print(
+        f"Model size: {sum(p.numel() for p in _lm.parameters()) / 1e9:.2f}B parameters"
+    )
 
     mimi_frame_size = mimi.frame_size
 
@@ -95,7 +96,9 @@ def main(args):
             len(audio) / batch["audio"][0]["sampling_rate"] for audio in audios
         ]
         minibatch_size = len(audios)
-        batch["audio_filepath"] = data_utils.extract_audio_filepaths_from_batch(batch, minibatch_size)
+        batch["audio_filepath"] = data_utils.extract_audio_filepaths_from_batch(
+            batch, minibatch_size
+        )
 
         # Start timing
         start_time = time.time()
@@ -140,7 +143,7 @@ def main(args):
 
     if args.warmup_steps is not None:
         warmup_dataset = data_utils.load_data(args)
-        warmup_dataset = data_utils.prepare_data(warmup_dataset)
+        warmup_dataset = data_utils.prepare_data(warmup_dataset, args=args)
 
         num_warmup_samples = args.warmup_steps * args.batch_size
         if args.streaming:
@@ -157,7 +160,7 @@ def main(args):
             continue
 
     dataset = data_utils.load_data(args)
-    dataset = data_utils.prepare_data(dataset)
+    dataset = data_utils.prepare_data(dataset, args=args)
 
     if args.max_eval_samples is not None and args.max_eval_samples > 0:
         print(f"Subsampling dataset to first {args.max_eval_samples} samples!")
@@ -201,9 +204,7 @@ def main(args):
 
     norm_refs = [data_utils.normalizer(r) for r in all_results["references"]]
     norm_preds = [data_utils.normalizer(p) for p in all_results["predictions"]]
-    wer = wer_metric.compute(
-        references=norm_refs, predictions=norm_preds
-    )
+    wer = wer_metric.compute(references=norm_refs, predictions=norm_preds)
     wer = round(100 * wer, 2)
     rtfx = round(
         sum(all_results["audio_length_s"]) / sum(all_results["transcription_time_s"]), 2
@@ -268,6 +269,8 @@ if __name__ == "__main__":
         default=10,
         help="Number of warm-up steps to run before launching the timed runs.",
     )
+    data_utils.add_audio_preprocessor_args(parser)
+
     args = parser.parse_args()
 
     main(args)
