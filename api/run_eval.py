@@ -104,15 +104,18 @@ def transcribe_dataset(
     max_samples=None,
     max_workers=4,
     prompt=None,
+    args=None,
 ):
     if use_url:
+        if getattr(args, "audio_preprocessor", "none") != "none":
+            raise ValueError("--audio_preprocessor requires local audio; do not use --use_url")
         audio_rows = fetch_audio_urls(dataset_path, dataset, split)
         if max_samples:
             audio_rows = itertools.islice(audio_rows, max_samples)
         ds = audio_rows
     else:
         ds = datasets.load_dataset(dataset_path, dataset, split=split, streaming=False)
-        ds = data_utils.prepare_data(ds)
+        ds = data_utils.prepare_data(ds, args=args)
         if max_samples:
             ds = ds.take(max_samples)
 
@@ -237,8 +240,11 @@ if __name__ == "__main__":
         default=None,
         help="Optional prompt to pass to the provider (e.g., 'Output must be in lexical format.')",
     )
+    data_utils.add_audio_preprocessor_args(parser)
 
     args = parser.parse_args()
+    if args.use_url and args.audio_preprocessor != "none":
+        parser.error("--audio_preprocessor requires local audio; do not use --use_url")
 
     transcribe_dataset(
         dataset_path=args.dataset_path,
@@ -249,4 +255,5 @@ if __name__ == "__main__":
         max_samples=args.max_samples,
         max_workers=args.max_workers,
         prompt=args.prompt,
+        args=args,
     )
