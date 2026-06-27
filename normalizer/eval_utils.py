@@ -1,10 +1,168 @@
 import os
 import glob
 import json
+import socket
+import urllib.request
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 
 from collections import defaultdict
 from kaldialign import batch_error_rate
+
+_SLACK_CHAT_POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage"
+
+
+def _format_slack_number(value, decimals=2):
+    if value is None:
+        return "n/a"
+    return f"{value:.{decimals}f}"
+
+
+def _chunk_slack_lines(lines, limit=2800):
+    chunks = []
+    current = []
+    current_len = 0
+    for line in lines:
+        next_len = len(line) + 1
+        if current and current_len + next_len > limit:
+            chunks.append("\n".join(current))
+            current = []
+            current_len = 0
+        current.append(line)
+        current_len += next_len
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
+
+
+def _build_slack_eval_payload(
+    channel,
+    directory,
+    result_files,
+    original_model_id,
+    composite_wer,
+    composite_audio_length,
+    composite_inference_time,
+    count_entries,
+    results,
+    multilingual,
+    language,
+):
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    model_lines = []
+    for model_key, total_wer in composite_wer.items():
+        avg_wer = total_wer / count_entries[model_key]
+        if composite_audio_length[model_key] is not None:
+            rtfx = composite_audio_length[model_key] / composite_inference_time[model_key]
+        else:
+            rtfx = None
+        model_label = original_model_id if original_model_id is not None else model_key
+        model_lines.append(
+            f"*{model_label}*: WER {_format_slack_number(avg_wer)}%, "
+            f"RTFx {_format_slack_number(rtfx)}"
+        )
+
+    dataset_ids = [key.split("|", 1)[1].strip() for key in results]
+    dataset_lines = []
+    for result_key, metrics in results.items():
+        model_label, dataset_id = [part.strip() for part in result_key.split("|", 1)]
+        if len(composite_wer) == 1:
+            prefix = dataset_id
+        else:
+            prefix = f"{model_label} / {dataset_id}"
+        line = f"- {prefix}: WER {_format_slack_number(metrics['wer'])}%"
+        if metrics["rtfx"] is not None:
+            line += f", RTFx {_format_slack_number(metrics['rtfx'])}"
+        dataset_lines.append(line)
+
+    metadata = [
+        f"*Results dir:* `{os.path.abspath(directory)}`",
+        f"*Result files:* {len(result_files)}",
+        f"*Datasets:* {len(dataset_ids)}",
+        f"*Language:* `{language}`",
+        f"*Multilingual:* `{multilingual}`",
+        f"*Finished:* {timestamp}",
+        f"*Host:* `{socket.gethostname()}`",
+    ]
+    for env_name in ("RESULTS_BUCKET", "SPACE", "FLAVOR", "ORG_NAME", "HF_JOB_ID"):
+        env_value = os.environ.get(env_name)
+        if env_value:
+            metadata.append(f"*{env_name}:* `{env_value}`")
+
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*ASR evaluation completed*\n" + "\n".join(model_lines),
+            },
+        },
+        {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(metadata)}},
+    ]
+    for chunk in _chunk_slack_lines(dataset_lines):
+        blocks.append(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "*Per-dataset results:*\n" + chunk},
+            }
+        )
+
+    return {
+        "channel": channel,
+        "text": "ASR evaluation completed: " + "; ".join(model_lines),
+        "blocks": blocks,
+    }
+
+
+def _post_slack_eval_summary(
+    directory,
+    result_files,
+    original_model_id,
+    composite_wer,
+    composite_audio_length,
+    composite_inference_time,
+    count_entries,
+    results,
+    multilingual,
+    language,
+):
+    token = os.environ.get("SLACK_BOT_TOKEN")
+    channel = os.environ.get("SLACK_CHANNEL_ID")
+    if not token or not channel:
+        return
+
+    payload = _build_slack_eval_payload(
+        channel,
+        directory,
+        result_files,
+        original_model_id,
+        composite_wer,
+        composite_audio_length,
+        composite_inference_time,
+        count_entries,
+        results,
+        multilingual,
+        language,
+    )
+    request = urllib.request.Request(
+        _SLACK_CHAT_POST_MESSAGE_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            response_body = response.read().decode("utf-8")
+        slack_response = json.loads(response_body)
+        if not slack_response.get("ok"):
+            error = slack_response.get("error", "unknown_error")
+            print(f"WARNING: Slack notification failed: {error}")
+    except Exception as exc:
+        print(f"WARNING: Slack notification failed: {exc}")
 
 
 def normalize_compound_pairs(refs, preds):
@@ -506,5 +664,18 @@ def score_results(
         else:
             if presence_substr in all_dataset_ids:
                 print_csv_block(header, col_map, family_key, family_name)
+
+    _post_slack_eval_summary(
+        directory,
+        result_files,
+        original_model_id,
+        composite_wer,
+        composite_audio_length,
+        composite_inference_time,
+        count_entries,
+        results,
+        multilingual,
+        language,
+    )
 
     return composite_wer, results
