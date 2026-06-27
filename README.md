@@ -76,6 +76,24 @@ For contributors who want to test locally or evaluate multilingual/long-form mod
 
 Each model family has a `run_eval.py` entry point driven by a corresponding bash script (e.g. `run_whisper.sh`). The script outputs a JSONL file with predictions and prints WER and RTFx after completion. See the sub-folders of this repo for examples; the latest scripts are in the HF Spaces linked above.
 
+### Optional audio preprocessing
+
+English short-form runners that use the shared `normalizer.data_utils.prepare_data` path can run eval-time audio preprocessing before ASR:
+
+```bash
+python transformers/run_eval.py \
+    --model_id=openai/whisper-large-v3-turbo \
+    --dataset_path=hf-audio/open-asr-leaderboard \
+    --dataset=librispeech \
+    --split=test.clean \
+    --device=0 \
+    --batch_size=1 \
+    --max_eval_samples=2 \
+    --audio_preprocessor=arctan
+```
+
+`--audio_preprocessor=arctan` requires the optional `arctan-vi` package and a valid `ARCTAN_SDK_KEY` in the eval environment or `.env` file. The `.env` file is loaded with `python-dotenv` when Arctan preprocessing is enabled. The default is `--audio_preprocessor=none`, which preserves the existing evaluation path. API URL mode, multilingual scripts, Nemo scripts, and long-form scripts are not wired for this MVP path. Reported RTFx still measures ASR inference time only; preprocessing runs before the timed transcription section.
+
 # Trade-off plots
 
 For open-source models, you can plot tradeoff plots like below with `scripts/plot_all.sh`.

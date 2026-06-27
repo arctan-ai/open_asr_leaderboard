@@ -18,7 +18,6 @@ wer_metric = evaluate.load("wer")
 
 
 def main(args):
-
     DATA_CACHE_DIR = os.path.join(os.getcwd(), "audio_cache")
     DATASET_NAME = args.dataset
     SPLIT_NAME = args.split
@@ -29,27 +28,27 @@ def main(args):
 
     if args.device >= 0:
         device = torch.device(f"cuda:{args.device}")
-        compute_dtype=torch.bfloat16
+        compute_dtype = torch.bfloat16
     else:
         device = torch.device("cpu")
-        compute_dtype=torch.float32
-        
+        compute_dtype = torch.float32
 
     if args.model_id.endswith(".nemo"):
         asr_model = ASRModel.restore_from(args.model_id, map_location=device)
     else:
         asr_model = ASRModel.from_pretrained(args.model_id, map_location=device)  # type: ASRModel
-       
+
     if args.longform:
         asr_model.change_attention_model("rel_pos_local_attn", [128, 128])  # local attn
     asr_model.to(compute_dtype)
     asr_model.eval()
-    print(f"Model size: {sum(p.numel() for p in asr_model.parameters()) / 1e9:.2f}B parameters")
+    print(
+        f"Model size: {sum(p.numel() for p in asr_model.parameters()) / 1e9:.2f}B parameters"
+    )
 
     dataset = data_utils.load_data(args)
 
     def download_audio_files(batch, indices):
-
         # download audio files and write the paths, transcriptions and durations to a manifest file
         audio_paths = []
         durations = []
@@ -63,9 +62,13 @@ def main(args):
                 audio_array = np.float32(sample["array"])
                 sample_rate = 16000
 
-            elif "bytes" in sample: # added to be compatible with latest datasets library (3.x.x) that produces byte stream
+            elif (
+                "bytes" in sample
+            ):  # added to be compatible with latest datasets library (3.x.x) that produces byte stream
                 with io.BytesIO(sample["bytes"]) as audio_file:
-                    audio_array, sample_rate = soundfile.read(audio_file, dtype="float32")
+                    audio_array, sample_rate = soundfile.read(
+                        audio_file, dtype="float32"
+                    )
 
             else:
                 raise ValueError("Sample must have either 'array' or 'bytes' key")
@@ -77,13 +80,13 @@ def main(args):
             audio_paths.append(audio_path)
             durations.append(len(audio_array) / sample_rate)
 
-        
-        batch["references"] = batch["original_text"]  # raw; normalization applied at scoring time
+        batch["references"] = batch[
+            "original_text"
+        ]  # raw; normalization applied at scoring time
         batch["audio_filepaths"] = audio_paths
         batch["durations"] = durations
 
         return batch
-
 
     if args.max_eval_samples is not None and args.max_eval_samples > 0:
         print(f"Subsampling dataset to first {args.max_eval_samples} samples !")
@@ -93,9 +96,15 @@ def main(args):
     if asr_model.cfg.decoding.strategy != "beam":
         asr_model.cfg.decoding.strategy = "greedy_batch"
         asr_model.change_decoding_strategy(asr_model.cfg.decoding)
-    
+
     # prepraing the offline dataset
-    dataset = dataset.map(download_audio_files, batch_size=args.batch_size, batched=True, with_indices=True, remove_columns=["audio"])
+    dataset = dataset.map(
+        download_audio_files,
+        batch_size=args.batch_size,
+        batched=True,
+        with_indices=True,
+        remove_columns=["audio"],
+    )
 
     # Write manifest from daraset batch using json and keys audio_filepath, duration, text
 
@@ -109,31 +118,49 @@ def main(args):
     for data in tqdm(data_itr, desc="Downloading Samples"):
         for key in all_data:
             all_data[key].append(data[key])
-    
+
     # Sort audio_filepaths and references based on durations values
-    sorted_indices = sorted(range(len(all_data["durations"])), key=lambda k: all_data["durations"][k], reverse=True)
-    all_data["audio_filepaths"] = [all_data["audio_filepaths"][i] for i in sorted_indices]
+    sorted_indices = sorted(
+        range(len(all_data["durations"])),
+        key=lambda k: all_data["durations"][k],
+        reverse=True,
+    )
+    all_data["audio_filepaths"] = [
+        all_data["audio_filepaths"][i] for i in sorted_indices
+    ]
     all_data["references"] = [all_data["references"][i] for i in sorted_indices]
     all_data["durations"] = [all_data["durations"][i] for i in sorted_indices]
 
     total_time = 0
-    for _ in range(2): # warmup once and calculate rtf
+    for _ in range(2):  # warmup once and calculate rtf
         if _ == 0:
-            audio_files = all_data["audio_filepaths"][:args.batch_size * 4] # warmup with 4 batches
+            audio_files = all_data["audio_filepaths"][
+                : args.batch_size * 4
+            ]  # warmup with 4 batches
         else:
             audio_files = all_data["audio_filepaths"]
         start_time = time.time()
-        with torch.inference_mode(), torch.no_grad(): 
+        with torch.inference_mode(), torch.no_grad():
+            if "canary" in args.model_id and "v2" not in args.model_id:
+                pnc = "nopnc"
+            else:
+                pnc = "pnc"
 
-            if 'canary' in args.model_id and 'v2' not in args.model_id:
-                pnc = 'nopnc'
+            if "canary" in args.model_id:
+                transcriptions = asr_model.transcribe(
+                    audio_files,
+                    batch_size=args.batch_size,
+                    verbose=False,
+                    pnc=pnc,
+                    num_workers=1,
+                )
             else:
-                pnc = 'pnc'
-                
-            if 'canary' in args.model_id:
-                transcriptions = asr_model.transcribe(audio_files, batch_size=args.batch_size, verbose=False, pnc=pnc, num_workers=1)
-            else:
-                transcriptions = asr_model.transcribe(audio_files, batch_size=args.batch_size, verbose=False, num_workers=1)
+                transcriptions = asr_model.transcribe(
+                    audio_files,
+                    batch_size=args.batch_size,
+                    verbose=False,
+                    num_workers=1,
+                )
         end_time = time.time()
         if _ == 1:
             total_time += end_time - start_time
@@ -141,7 +168,9 @@ def main(args):
 
     if isinstance(transcriptions, tuple) and len(transcriptions) == 2:
         transcriptions = transcriptions[0]
-    predictions = [pred.text for pred in transcriptions]  # raw; normalization applied at scoring time
+    predictions = [
+        pred.text for pred in transcriptions
+    ]  # raw; normalization applied at scoring time
 
     avg_time = total_time / len(all_data["audio_filepaths"])
 
@@ -159,7 +188,7 @@ def main(args):
 
     print("Results saved at path:", os.path.abspath(manifest_path))
 
-    norm_refs = [data_utils.normalizer(r) for r in all_data['references']]
+    norm_refs = [data_utils.normalizer(r) for r in all_data["references"]]
     norm_preds = [data_utils.normalizer(p) for p in predictions]
     wer = wer_metric.compute(references=norm_refs, predictions=norm_preds)
     wer = round(100 * wer, 2)
@@ -177,10 +206,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
-        "--model_id", type=str, required=True, help="Model identifier. Should be loadable with NVIDIA NeMo.",
+        "--model_id",
+        type=str,
+        required=True,
+        help="Model identifier. Should be loadable with NVIDIA NeMo.",
     )
     parser.add_argument(
-        '--dataset_path', type=str, default='hf-audio/open-asr-leaderboard', help='Dataset path. By default, it is `hf-audio/open-asr-leaderboard`'
+        "--dataset_path",
+        type=str,
+        default="hf-audio/open-asr-leaderboard",
+        help="Dataset path. By default, it is `hf-audio/open-asr-leaderboard`",
     )
     parser.add_argument(
         "--dataset",
@@ -202,7 +237,10 @@ if __name__ == "__main__":
         help="The device to run the pipeline on. -1 for CPU (default), 0 for the first GPU and so on.",
     )
     parser.add_argument(
-        "--batch_size", type=int, default=32, help="Number of samples to go through each streamed batch.",
+        "--batch_size",
+        type=int,
+        default=32,
+        help="Number of samples to go through each streamed batch.",
     )
     parser.add_argument(
         "--max_eval_samples",

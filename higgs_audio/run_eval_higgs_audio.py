@@ -68,7 +68,9 @@ def main(args):
     )
     tokenizer = AutoTokenizer.from_pretrained(args.model_id, trust_remote_code=True)
     model.eval()
-    print(f"Model size: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B parameters")
+    print(
+        f"Model size: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B parameters"
+    )
 
     # Required for generation stop conditions
     model.audio_out_bos_token_id = tokenizer.convert_tokens_to_ids("<|audio_out_bos|>")
@@ -89,7 +91,10 @@ def main(args):
 
         # INFERENCE
         pred_text = transcribe_batch(
-            model, tokenizer, audios, sample_rates=16000,
+            model,
+            tokenizer,
+            audios,
+            sample_rates=16000,
             max_new_tokens=args.max_new_tokens,
         )
 
@@ -106,7 +111,7 @@ def main(args):
 
     if args.warmup_steps is not None:
         warmup_dataset = data_utils.load_data(args)
-        warmup_dataset = data_utils.prepare_data(warmup_dataset)
+        warmup_dataset = data_utils.prepare_data(warmup_dataset, args=args)
 
         num_warmup_samples = args.warmup_steps * args.batch_size
         if args.streaming:
@@ -123,19 +128,19 @@ def main(args):
             continue
 
     dataset = data_utils.load_data(args)
-    dataset = data_utils.prepare_data(dataset)
+    dataset = data_utils.prepare_data(dataset, args=args)
 
     if args.max_eval_samples is not None and args.max_eval_samples > 0:
         print(f"Subsampling dataset to first {args.max_eval_samples} samples!")
         if args.streaming:
             dataset = dataset.take(args.max_eval_samples)
         else:
-            dataset = dataset.select(
-                range(min(args.max_eval_samples, len(dataset)))
-            )
+            dataset = dataset.select(range(min(args.max_eval_samples, len(dataset))))
 
     dataset = dataset.map(
-        benchmark, batch_size=args.batch_size, batched=True,
+        benchmark,
+        batch_size=args.batch_size,
+        batched=True,
         remove_columns=["audio"],
     )
 
@@ -236,6 +241,8 @@ if __name__ == "__main__":
         default=10,
         help="Number of warm-up steps to run before launching the timed runs.",
     )
+    data_utils.add_audio_preprocessor_args(parser)
+
     args = parser.parse_args()
     parser.set_defaults(streaming=False)
 

@@ -9,6 +9,7 @@ from tqdm import tqdm
 
 wer_metric = evaluate.load("wer")
 
+
 def main(args):
     # Load model
     device = "cpu" if args.device == -1 else f"cuda:{args.device}"
@@ -25,20 +26,29 @@ def main(args):
         load_args["model_tag"] = args.model_id
 
     model = Speech2TextGreedySearch.from_pretrained(**load_args)
-    print(f"Model size: {sum(p.numel() for p in model.s2t_model.parameters()) / 1e9:.2f}B parameters")
+    print(
+        f"Model size: {sum(p.numel() for p in model.s2t_model.parameters()) / 1e9:.2f}B parameters"
+    )
 
     def benchmark(batch):
         # Load audio inputs
         audios = [audio["array"] for audio in batch["audio"]]
-        batch["audio_length_s"] = [len(audio) / batch["audio"][0]["sampling_rate"] for audio in audios]
+        batch["audio_length_s"] = [
+            len(audio) / batch["audio"][0]["sampling_rate"] for audio in audios
+        ]
         minibatch_size = len(audios)
-        batch["audio_filepath"] = data_utils.extract_audio_filepaths_from_batch(batch, minibatch_size)
+        batch["audio_filepath"] = data_utils.extract_audio_filepaths_from_batch(
+            batch, minibatch_size
+        )
 
         # Start timing
         start_time = time.time()
 
         # INFERENCE
-        with torch.autocast(device, torch.bfloat16, enabled=True), torch.inference_mode():
+        with (
+            torch.autocast(device, torch.bfloat16, enabled=True),
+            torch.inference_mode(),
+        ):
             pred_text = model.batch_decode(
                 audios,
                 batch_size=args.batch_size,
@@ -52,25 +62,31 @@ def main(args):
         batch["transcription_time_s"] = minibatch_size * [runtime / minibatch_size]
 
         batch["predictions"] = pred_text  # raw; normalization applied at scoring time
-        batch["references"] = batch["original_text"]  # raw; normalization applied at scoring time
+        batch["references"] = batch[
+            "original_text"
+        ]  # raw; normalization applied at scoring time
         return batch
 
     if args.warmup_steps is not None:
         warmup_dataset = data_utils.load_data(args)
-        warmup_dataset = data_utils.prepare_data(warmup_dataset)
+        warmup_dataset = data_utils.prepare_data(warmup_dataset, args=args)
 
         num_warmup_samples = args.warmup_steps * args.batch_size
         if args.streaming:
             warmup_dataset = warmup_dataset.take(num_warmup_samples)
         else:
-            warmup_dataset = warmup_dataset.select(range(min(num_warmup_samples, len(warmup_dataset))))
-        warmup_dataset = iter(warmup_dataset.map(benchmark, batch_size=args.batch_size, batched=True))
+            warmup_dataset = warmup_dataset.select(
+                range(min(num_warmup_samples, len(warmup_dataset)))
+            )
+        warmup_dataset = iter(
+            warmup_dataset.map(benchmark, batch_size=args.batch_size, batched=True)
+        )
 
         for _ in tqdm(warmup_dataset, desc="Warming up..."):
             continue
 
     dataset = data_utils.load_data(args)
-    dataset = data_utils.prepare_data(dataset)
+    dataset = data_utils.prepare_data(dataset, args=args)
 
     if args.max_eval_samples is not None and args.max_eval_samples > 0:
         print(f"Subsampling dataset to first {args.max_eval_samples} samples!")
@@ -80,7 +96,10 @@ def main(args):
             dataset = dataset.select(range(min(args.max_eval_samples, len(dataset))))
 
     dataset = dataset.map(
-        benchmark, batch_size=args.batch_size, batched=True, remove_columns=["audio"],
+        benchmark,
+        batch_size=args.batch_size,
+        batched=True,
+        remove_columns=["audio"],
     )
 
     all_results = {
@@ -111,11 +130,11 @@ def main(args):
 
     norm_refs = [data_utils.normalizer(r) for r in all_results["references"]]
     norm_preds = [data_utils.normalizer(p) for p in all_results["predictions"]]
-    wer = wer_metric.compute(
-        references=norm_refs, predictions=norm_preds
-    )
+    wer = wer_metric.compute(references=norm_refs, predictions=norm_preds)
     wer = round(100 * wer, 2)
-    rtfx = round(sum(all_results["audio_length_s"]) / sum(all_results["transcription_time_s"]), 2)
+    rtfx = round(
+        sum(all_results["audio_length_s"]) / sum(all_results["transcription_time_s"]), 2
+    )
     print("WER:", wer, "%", "RTFx:", rtfx)
 
 
@@ -176,6 +195,8 @@ if __name__ == "__main__":
         default=10,
         help="Number of warm-up steps to run before launching the timed runs.",
     )
+    data_utils.add_audio_preprocessor_args(parser)
+
     args = parser.parse_args()
 
     main(args)

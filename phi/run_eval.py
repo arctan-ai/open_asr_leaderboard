@@ -1,7 +1,12 @@
 import argparse
 import os
 import torch
-from transformers import AutoModelForCausalLM, AutoProcessor, StoppingCriteria, StoppingCriteriaList
+from transformers import (
+    AutoModelForCausalLM,
+    AutoProcessor,
+    StoppingCriteria,
+    StoppingCriteriaList,
+)
 import evaluate
 from normalizer import data_utils
 import time
@@ -9,6 +14,7 @@ from tqdm import tqdm
 
 wer_metric = evaluate.load("wer")
 torch.set_float32_matmul_precision("medium")
+
 
 class MultipleTokenBatchStoppingCriteria(StoppingCriteria):
     """Stopping criteria capable of receiving multiple stop-tokens and handling batched inputs."""
@@ -24,12 +30,18 @@ class MultipleTokenBatchStoppingCriteria(StoppingCriteria):
 
         self.stop_tokens = stop_tokens
         self.max_stop_tokens = stop_tokens.shape[-1]
-        self.stop_tokens_idx = torch.zeros(batch_size, dtype=torch.long, device=stop_tokens.device)
+        self.stop_tokens_idx = torch.zeros(
+            batch_size, dtype=torch.long, device=stop_tokens.device
+        )
 
-    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> bool:
+    def __call__(
+        self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs
+    ) -> bool:
         # Only gather the maximum number of inputs compatible with stop tokens
         # and checks whether generated inputs are equal to `stop_tokens`
-        generated_inputs = torch.eq(input_ids[:, -self.max_stop_tokens :].unsqueeze(1), self.stop_tokens)
+        generated_inputs = torch.eq(
+            input_ids[:, -self.max_stop_tokens :].unsqueeze(1), self.stop_tokens
+        )
         equal_generated_inputs = torch.all(generated_inputs, dim=2)
 
         # Mark the position where a stop token has been produced for each input in the batch,
@@ -58,7 +70,9 @@ def main(args):
             _attn_implementation="eager",
         ).to(args.device)
     model.eval()
-    print(f"Model size: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B parameters")
+    print(
+        f"Model size: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B parameters"
+    )
     processor = AutoProcessor.from_pretrained(args.model_id, trust_remote_code=True)
 
     user = "<|user|>"
@@ -70,23 +84,35 @@ def main(args):
     gen_kwargs = {"max_new_tokens": args.max_new_tokens, "num_beams": args.num_beams}
 
     stop_tokens = [prompt_suffix, processor.tokenizer.eos_token]
-    stop_tokens_ids = processor.tokenizer(stop_tokens, add_special_tokens=False, padding="longest", return_tensors="pt")["input_ids"]
+    stop_tokens_ids = processor.tokenizer(
+        stop_tokens, add_special_tokens=False, padding="longest", return_tensors="pt"
+    )["input_ids"]
     stop_tokens_ids = stop_tokens_ids.to(model.device)
 
     def benchmark(batch, min_new_tokens=None):
         # Load audio inputs
         audios = [(audio["array"], audio["sampling_rate"]) for audio in batch["audio"]]
         minibatch_size = len(audios)
-        batch["audio_filepath"] = data_utils.extract_audio_filepaths_from_batch(batch, minibatch_size)
-        batch["audio_length_s"] = [len(audio["array"]) / audio["sampling_rate"] for audio in batch["audio"]]
+        batch["audio_filepath"] = data_utils.extract_audio_filepaths_from_batch(
+            batch, minibatch_size
+        )
+        batch["audio_length_s"] = [
+            len(audio["array"]) / audio["sampling_rate"] for audio in batch["audio"]
+        ]
         gen_kwargs["stopping_criteria"] = StoppingCriteriaList(
-            [MultipleTokenBatchStoppingCriteria(stop_tokens_ids, batch_size=args.num_beams * minibatch_size)]
+            [
+                MultipleTokenBatchStoppingCriteria(
+                    stop_tokens_ids, batch_size=args.num_beams * minibatch_size
+                )
+            ]
         )
 
         # START TIMING
         start_time = time.time()
 
-        inputs = processor(text=[prompt] * minibatch_size, audios=audios, return_tensors="pt").to(args.device)
+        inputs = processor(
+            text=[prompt] * minibatch_size, audios=audios, return_tensors="pt"
+        ).to(args.device)
 
         # Model Inference
         pred_ids = model.generate(
@@ -98,7 +124,9 @@ def main(args):
         )
 
         # Gather the sequence index of the stop token
-        stop_tokens_idx = gen_kwargs["stopping_criteria"][0].stop_tokens_idx.reshape(minibatch_size, -1)[:, 0]
+        stop_tokens_idx = gen_kwargs["stopping_criteria"][0].stop_tokens_idx.reshape(
+            minibatch_size, -1
+        )[:, 0]
 
         # If a stop token was produced, we need to remove its length from the found index,
         # however there might be a chance that the stop token was not produced and the index
@@ -111,7 +139,11 @@ def main(args):
 
         # Convert token ids to text transcription
         pred_text = [
-            processor.decode(_pred_ids[inputs["input_ids"].shape[1] : _stop_tokens_idx], skip_special_tokens=True, clean_up_tokenization_spaces=False)
+            processor.decode(
+                _pred_ids[inputs["input_ids"].shape[1] : _stop_tokens_idx],
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )
             for _pred_ids, _stop_tokens_idx in zip(pred_ids, stop_tokens_idx)
         ]
 
@@ -122,19 +154,30 @@ def main(args):
         batch["transcription_time_s"] = minibatch_size * [runtime / minibatch_size]
 
         batch["predictions"] = pred_text  # raw; normalization applied at scoring time
-        batch["references"] = batch["original_text"]  # raw; normalization applied at scoring time
+        batch["references"] = batch[
+            "original_text"
+        ]  # raw; normalization applied at scoring time
         return batch
 
     if args.warmup_steps is not None:
         dataset = data_utils.load_data(args)
-        dataset = data_utils.prepare_data(dataset)
+        dataset = data_utils.prepare_data(dataset, args=args)
 
         num_warmup_samples = args.warmup_steps * args.batch_size
         if args.streaming:
             warmup_dataset = dataset.take(num_warmup_samples)
         else:
-            warmup_dataset = dataset.select(range(min(num_warmup_samples, len(dataset))))
-        warmup_dataset = iter(warmup_dataset.map(benchmark, batch_size=args.batch_size // 2, batched=True, fn_kwargs={"min_new_tokens": args.max_new_tokens}))
+            warmup_dataset = dataset.select(
+                range(min(num_warmup_samples, len(dataset)))
+            )
+        warmup_dataset = iter(
+            warmup_dataset.map(
+                benchmark,
+                batch_size=args.batch_size // 2,
+                batched=True,
+                fn_kwargs={"min_new_tokens": args.max_new_tokens},
+            )
+        )
 
         for _ in tqdm(warmup_dataset, desc="Warming up..."):
             continue
@@ -146,10 +189,13 @@ def main(args):
             dataset = dataset.take(args.max_eval_samples)
         else:
             dataset = dataset.select(range(min(args.max_eval_samples, len(dataset))))
-    dataset = data_utils.prepare_data(dataset)
+    dataset = data_utils.prepare_data(dataset, args=args)
 
     dataset = dataset.map(
-        benchmark, batch_size=args.batch_size, batched=True, remove_columns=["audio"],
+        benchmark,
+        batch_size=args.batch_size,
+        batched=True,
+        remove_columns=["audio"],
     )
 
     all_results = {
@@ -180,11 +226,11 @@ def main(args):
 
     norm_refs = [data_utils.normalizer(r) for r in all_results["references"]]
     norm_preds = [data_utils.normalizer(p) for p in all_results["predictions"]]
-    wer = wer_metric.compute(
-        references=norm_refs, predictions=norm_preds
-    )
+    wer = wer_metric.compute(references=norm_refs, predictions=norm_preds)
     wer = round(100 * wer, 2)
-    rtfx = round(sum(all_results["audio_length_s"]) / sum(all_results["transcription_time_s"]), 2)
+    rtfx = round(
+        sum(all_results["audio_length_s"]) / sum(all_results["transcription_time_s"]), 2
+    )
     print("WER:", wer, "%", "RTFx:", rtfx)
 
 
@@ -263,6 +309,8 @@ if __name__ == "__main__":
         default="Transcribe the audio clip into text.",
         help="User prompt string.",
     )
+    data_utils.add_audio_preprocessor_args(parser)
+
     args = parser.parse_args()
 
     main(args)

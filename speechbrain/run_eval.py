@@ -4,6 +4,7 @@ Authors
 * Adel Moumen 2023 <adel.moumen@univ-avignon.fr>
 * Sanchit Gandhi 2024 <sanchit@huggingface.co>
 """
+
 import argparse
 import time
 
@@ -14,6 +15,7 @@ import torch
 import speechbrain.inference.ASR as ASR
 from speechbrain.utils.data_utils import batch_pad_right
 import os
+
 
 def get_model(
     speechbrain_repository: str,
@@ -90,7 +92,7 @@ def get_model(
         raise AttributeError(
             f"SpeechBrain Pretrained class: {speechbrain_pretrained_class_name} not found in pretrained.py"
         )
-    
+
     return model_class.from_hparams(**kwargs)
 
 
@@ -102,26 +104,32 @@ def main(args):
         device = f"cuda:{args.device}"
 
     model = get_model(
-        args.source, 
-        args.speechbrain_pretrained_class_name, 
+        args.source,
+        args.speechbrain_pretrained_class_name,
         args.beam_size,
-        args.ctc_weight_decode, 
-        device=device
+        args.ctc_weight_decode,
+        device=device,
     )
-    print(f"Model size: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B parameters")
+    print(
+        f"Model size: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B parameters"
+    )
 
     def benchmark(batch):
         # Load audio inputs
         audios = [torch.from_numpy(sample["array"]) for sample in batch["audio"]]
         minibatch_size = len(audios)
         sampling_rate = batch["audio"][0]["sampling_rate"]
-        batch["audio_length_s"] = [len(sample["array"]) / sampling_rate for sample in batch["audio"]]
-        batch["audio_filepath"] = data_utils.extract_audio_filepaths_from_batch(batch, minibatch_size)
+        batch["audio_length_s"] = [
+            len(sample["array"]) / sampling_rate for sample in batch["audio"]
+        ]
+        batch["audio_filepath"] = data_utils.extract_audio_filepaths_from_batch(
+            batch, minibatch_size
+        )
 
         audios, audio_lens = batch_pad_right(audios)
         audios = audios.to(device)
         audio_lens = audio_lens.to(device)
-        
+
         start_time = time.time()
         with torch.autocast(device_type="cuda"):
             predictions, _ = model.transcribe_batch(audios, audio_lens)
@@ -130,20 +138,25 @@ def main(args):
         batch["transcription_time_s"] = minibatch_size * [runtime / minibatch_size]
 
         batch["predictions"] = predictions  # raw; normalization applied at scoring time
-        batch["references"] = batch["original_text"]  # raw; normalization applied at scoring time
+        batch["references"] = batch[
+            "original_text"
+        ]  # raw; normalization applied at scoring time
         return batch
-
 
     if args.warmup_steps is not None:
         dataset = data_utils.load_data(args)
-        dataset = data_utils.prepare_data(dataset)
+        dataset = data_utils.prepare_data(dataset, args=args)
 
         num_warmup_samples = args.warmup_steps * args.batch_size
         if args.streaming:
             warmup_dataset = dataset.take(num_warmup_samples)
         else:
-            warmup_dataset = dataset.select(range(min(num_warmup_samples, len(dataset))))
-        warmup_dataset = iter(warmup_dataset.map(benchmark, batch_size=args.batch_size, batched=True))
+            warmup_dataset = dataset.select(
+                range(min(num_warmup_samples, len(dataset)))
+            )
+        warmup_dataset = iter(
+            warmup_dataset.map(benchmark, batch_size=args.batch_size, batched=True)
+        )
 
         for _ in tqdm(warmup_dataset, desc="Warming up..."):
             continue
@@ -155,10 +168,13 @@ def main(args):
             dataset = dataset.take(args.max_eval_samples)
         else:
             dataset = dataset.select(range(min(args.max_eval_samples, len(dataset))))
-    dataset = data_utils.prepare_data(dataset)
+    dataset = data_utils.prepare_data(dataset, args=args)
 
     dataset = dataset.map(
-        benchmark, batch_size=args.batch_size, batched=True, remove_columns=["audio"],
+        benchmark,
+        batch_size=args.batch_size,
+        batched=True,
+        remove_columns=["audio"],
     )
 
     all_results = {
@@ -190,11 +206,11 @@ def main(args):
     wer_metric = evaluate.load("wer")
     norm_refs = [data_utils.normalizer(r) for r in all_results["references"]]
     norm_preds = [data_utils.normalizer(p) for p in all_results["predictions"]]
-    wer = wer_metric.compute(
-        references=norm_refs, predictions=norm_preds
-    )
+    wer = wer_metric.compute(references=norm_refs, predictions=norm_preds)
     wer = round(100 * wer, 2)
-    rtfx = round(sum(all_results["audio_length_s"]) / sum(all_results["transcription_time_s"]), 2)
+    rtfx = round(
+        sum(all_results["audio_length_s"]) / sum(all_results["transcription_time_s"]), 2
+    )
     print("WER:", wer, "%", "RTFx:", rtfx)
 
 
@@ -264,17 +280,16 @@ if __name__ == "__main__":
         help="Number of warm-up steps to run before launching the timed runs.",
     )
     parser.add_argument(
-        "--beam_size",
-        type=int,
-        default=None,
-        help="Beam size for decoding"
+        "--beam_size", type=int, default=None, help="Beam size for decoding"
     )
     parser.add_argument(
         "--ctc_weight_decode",
         type=float,
         default=None,
-        help="Weight of CTC for joint CTC/Att. decoding. Only pass for models that support it (e.g. EncoderDecoderASR)."
+        help="Weight of CTC for joint CTC/Att. decoding. Only pass for models that support it (e.g. EncoderDecoderASR).",
     )
+    data_utils.add_audio_preprocessor_args(parser)
+
     args = parser.parse_args()
 
     main(args)

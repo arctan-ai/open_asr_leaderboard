@@ -15,7 +15,7 @@ def compute_pareto(df, x_col, y_col, x_goal="min", y_goal="min", y_fact=1.0):
     assert y_goal in {"min", "max"}
 
     # Sort so we sweep correctly
-    ascending = (x_goal == "min")
+    ascending = x_goal == "min"
     df_sorted = df.sort_values(x_col, ascending=ascending)
 
     pareto = []
@@ -58,7 +58,7 @@ def plot_wer_tradeoff(
     # Drop rows with missing data for this plot
     # -----------------------
     df_plot = df[[x_col, y_col, label_col]].dropna()
-    
+
     # Drop rows where y_col is -1 (missing/unknown values)
     df_plot = df_plot[df_plot[y_col] != -1]
 
@@ -66,24 +66,33 @@ def plot_wer_tradeoff(
         print(f"Warning: no valid data for plot '{output_file}'")
         return
 
-    pareto_df = compute_pareto(df_plot, x_col, y_col, x_goal=x_goal, y_goal=y_goal, y_fact=y_fact)
+    pareto_df = compute_pareto(
+        df_plot, x_col, y_col, x_goal=x_goal, y_goal=y_goal, y_fact=y_fact
+    )
     pareto_labels = set(pareto_df[label_col].values)
 
     # Filter points within limits before plotting
     if x_lim is not None:
         df_plot = df_plot[(df_plot[x_col] >= x_lim[0]) & (df_plot[x_col] <= x_lim[1])]
     if y_lim is not None:
-        df_plot = df_plot[(df_plot[y_col] * y_fact >= y_lim[0]) & (df_plot[y_col] * y_fact <= y_lim[1])]
+        df_plot = df_plot[
+            (df_plot[y_col] * y_fact >= y_lim[0])
+            & (df_plot[y_col] * y_fact <= y_lim[1])
+        ]
 
     # Use a nice style
-    plt.style.use('seaborn-v0_8-darkgrid')
+    plt.style.use("seaborn-v0_8-darkgrid")
     plt.figure(figsize=(12, 8))
 
     # Set y_offset before using it in filtering
-    y_offset = 1.35 if y_label.strip().lower() == 'rtfx' else 1.0
+    y_offset = 1.35 if y_label.strip().lower() == "rtfx" else 1.0
 
     # Margin for label/marker cutoff (as fraction of axis range)
-    margin_x = 0.07 if x_lim is not None and y_label.strip().lower() == 'rtfx' else (0.02 if x_lim is not None else 0.0)
+    margin_x = (
+        0.07
+        if x_lim is not None and y_label.strip().lower() == "rtfx"
+        else (0.02 if x_lim is not None else 0.0)
+    )
     margin_y = 0.02 if y_lim is not None else 0.0
     x_max = x_lim[1] if x_lim is not None else df_plot[x_col].max()
     y_max = y_lim[1] if y_lim is not None else (df_plot[y_col] * y_fact).max()
@@ -93,7 +102,7 @@ def plot_wer_tradeoff(
 
     # Separate Pareto and non-Pareto points for different styling, filter for RTFx margin
     pareto_mask = df_plot[label_col].isin(pareto_labels)
-    
+
     # Separate highlighted model if specified
     highlight_data = None
     if highlight_model is not None:
@@ -103,12 +112,24 @@ def plot_wer_tradeoff(
             df_plot = df_plot[~highlight_mask]
             # Recompute pareto_mask after removing highlight
             pareto_mask = df_plot[label_col].isin(pareto_labels)
-    
+
     non_pareto = df_plot[~pareto_mask]
     pareto_in_view = df_plot[pareto_mask]
-    if y_label.strip().lower() == 'rtfx':
-        non_pareto = non_pareto[non_pareto.apply(lambda row: marker_within_bounds(row[x_col], row[y_col] * y_fact), axis=1)]
-        pareto_in_view = pareto_in_view[pareto_in_view.apply(lambda row: marker_within_bounds(row[x_col], row[y_col] * y_fact * y_offset), axis=1)]
+    if y_label.strip().lower() == "rtfx":
+        non_pareto = non_pareto[
+            non_pareto.apply(
+                lambda row: marker_within_bounds(row[x_col], row[y_col] * y_fact),
+                axis=1,
+            )
+        ]
+        pareto_in_view = pareto_in_view[
+            pareto_in_view.apply(
+                lambda row: marker_within_bounds(
+                    row[x_col], row[y_col] * y_fact * y_offset
+                ),
+                axis=1,
+            )
+        ]
 
     # Plot non-Pareto points
     plt.scatter(
@@ -116,11 +137,11 @@ def plot_wer_tradeoff(
         non_pareto[y_col] * y_fact,
         s=120,
         alpha=0.6,
-        color='steelblue',
-        edgecolors='navy',
+        color="steelblue",
+        edgecolors="navy",
         linewidths=1.5,
-        label='Other models',
-        zorder=2
+        label="Other models",
+        zorder=2,
     )
 
     # For RTFx plot, offset Pareto points and line for visibility
@@ -132,12 +153,12 @@ def plot_wer_tradeoff(
         pareto_in_view[y_col] * y_fact * y_offset,
         s=180,
         alpha=0.9,
-        color='crimson',
-        edgecolors='darkred',
+        color="crimson",
+        edgecolors="darkred",
         linewidths=2,
-        label='Pareto frontier',
+        label="Pareto frontier",
         zorder=3,
-        marker='D'
+        marker="D",
     )
 
     # Pareto frontier line (offset vertically if RTFx)
@@ -147,23 +168,27 @@ def plot_wer_tradeoff(
         linewidth=3,
         color="crimson",
         alpha=0.7,
-        linestyle='--',
-        zorder=1
+        linestyle="--",
+        zorder=1,
     )
 
     # Plot highlighted model with star marker if specified
     if highlight_data is not None:
-        h_yval = highlight_data[y_col] * y_fact * (y_offset if y_label.strip().lower() == 'rtfx' else 1.0)
+        h_yval = (
+            highlight_data[y_col]
+            * y_fact
+            * (y_offset if y_label.strip().lower() == "rtfx" else 1.0)
+        )
         plt.scatter(
             highlight_data[x_col],
             h_yval,
             s=300,
             alpha=1.0,
-            color='gold',
-            edgecolors='darkorange',
+            color="gold",
+            edgecolors="darkorange",
             linewidths=3,
-            marker='*',
-            zorder=10
+            marker="*",
+            zorder=10,
         )
 
     if y_log_scale:
@@ -178,7 +203,11 @@ def plot_wer_tradeoff(
 
     # Label all points with improved styling
     # Margin for label cutoff (as fraction of axis range)
-    margin_x = 0.07 if x_lim is not None and y_label.strip().lower() == 'rtfx' else (0.02 if x_lim is not None else 0.0)
+    margin_x = (
+        0.07
+        if x_lim is not None and y_label.strip().lower() == "rtfx"
+        else (0.02 if x_lim is not None else 0.0)
+    )
     margin_y = 0.02 if y_lim is not None else 0.0
     x_max = x_lim[1] if x_lim is not None else df_plot[x_col].max()
     y_max = y_lim[1] if y_lim is not None else (df_plot[y_col] * y_fact).max()
@@ -192,24 +221,24 @@ def plot_wer_tradeoff(
     for _, row in non_pareto_sorted.iterrows():
         xval = row[x_col]
         yval = row[y_col] * y_fact
-        if y_label.strip().lower() == 'rtfx' and not label_within_bounds(xval, yval):
+        if y_label.strip().lower() == "rtfx" and not label_within_bounds(xval, yval):
             continue
         plt.text(
             xval,
             yval,
             row[label_col],
             fontsize=14,
-            fontweight='normal',
+            fontweight="normal",
             ha="left",
             va="bottom",
             bbox=dict(
-                boxstyle='round,pad=0.4',
-                facecolor='lightyellow',
-                edgecolor='gray',
+                boxstyle="round,pad=0.4",
+                facecolor="lightyellow",
+                edgecolor="gray",
                 alpha=0.7,
-                linewidth=0.5
+                linewidth=0.5,
             ),
-            zorder=4
+            zorder=4,
         )
 
     # Then plot Pareto labels on top (higher zorder)
@@ -217,62 +246,74 @@ def plot_wer_tradeoff(
     pareto_sorted = pareto_in_view.sort_values(by=x_col, ascending=False)
     for _, row in pareto_sorted.iterrows():
         xval = row[x_col]
-        yval = row[y_col] * y_fact * (y_offset if y_label.strip().lower() == 'rtfx' else 1.0)
-        if y_label.strip().lower() == 'rtfx' and not label_within_bounds(xval, yval):
+        yval = (
+            row[y_col]
+            * y_fact
+            * (y_offset if y_label.strip().lower() == "rtfx" else 1.0)
+        )
+        if y_label.strip().lower() == "rtfx" and not label_within_bounds(xval, yval):
             continue
         plt.text(
             xval,
             yval,
             row[label_col],
             fontsize=16,
-            fontweight='bold',
+            fontweight="bold",
             ha="left",
             va="bottom",
             bbox=dict(
-                boxstyle='round,pad=0.4',
-                facecolor='white',
-                edgecolor='darkred',
+                boxstyle="round,pad=0.4",
+                facecolor="white",
+                edgecolor="darkred",
                 alpha=0.9,
-                linewidth=1.5
+                linewidth=1.5,
             ),
-            zorder=5
+            zorder=5,
         )
 
     # Plot highlighted model label to the right of the star
     if highlight_data is not None:
         xval = highlight_data[x_col]
-        yval = highlight_data[y_col] * y_fact * (y_offset if y_label.strip().lower() == 'rtfx' else 1.0)
+        yval = (
+            highlight_data[y_col]
+            * y_fact
+            * (y_offset if y_label.strip().lower() == "rtfx" else 1.0)
+        )
         # Offset x position to the right (percentage of x range)
-        x_range = (x_lim[1] - x_lim[0]) if x_lim is not None else (df_plot[x_col].max() - df_plot[x_col].min())
+        x_range = (
+            (x_lim[1] - x_lim[0])
+            if x_lim is not None
+            else (df_plot[x_col].max() - df_plot[x_col].min())
+        )
         label_xval = xval + (x_range * 0.03)  # 3% of x-axis range to the right
         plt.text(
             label_xval,
             yval,
             highlight_data[label_col],
             fontsize=18,
-            fontweight='bold',
+            fontweight="bold",
             ha="left",
             va="center",
-            color='red',
+            color="red",
             bbox=dict(
-                boxstyle='round,pad=0.5',
-                facecolor='white',
-                edgecolor='red',
+                boxstyle="round,pad=0.5",
+                facecolor="white",
+                edgecolor="red",
                 alpha=0.95,
-                linewidth=2.5
+                linewidth=2.5,
             ),
-            zorder=100
+            zorder=100,
         )
 
-    plt.xlabel(x_label, fontsize=font_size, fontweight='bold')
-    plt.ylabel(y_label, fontsize=font_size, fontweight='bold')
+    plt.xlabel(x_label, fontsize=font_size, fontweight="bold")
+    plt.ylabel(y_label, fontsize=font_size, fontweight="bold")
     if title:
-        plt.title(title, fontsize=font_size + 2, fontweight='bold', pad=15)
-    plt.legend(fontsize=12, loc='best', framealpha=0.9)
-    plt.tick_params(axis='both', which='major', labelsize=font_size)
-    plt.tick_params(axis='both', which='minor', labelsize=font_size)
+        plt.title(title, fontsize=font_size + 2, fontweight="bold", pad=15)
+    plt.legend(fontsize=12, loc="best", framealpha=0.9)
+    plt.tick_params(axis="both", which="major", labelsize=font_size)
+    plt.tick_params(axis="both", which="minor", labelsize=font_size)
 
     plt.tight_layout()
     plt.savefig(output_file, dpi=300, bbox_inches="tight")
     plt.close()
-    plt.style.use('default')  # Reset style
+    plt.style.use("default")  # Reset style

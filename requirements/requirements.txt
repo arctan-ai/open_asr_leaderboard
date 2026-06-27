@@ -6,5 +6,6 @@ librosa
 jiwer
 num2words
 peft
+python-dotenv
 soundfile
 kaldialign

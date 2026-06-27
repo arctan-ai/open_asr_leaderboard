@@ -112,7 +112,9 @@ def transcribe_dataset(
             audio_rows = itertools.islice(audio_rows, max_samples)
         ds = audio_rows
     else:
-        ds = datasets.load_dataset(dataset_path, config_name, split=split, streaming=False)
+        ds = datasets.load_dataset(
+            dataset_path, config_name, split=split, streaming=False
+        )
         ds = ds.cast_column("audio", Audio(sampling_rate=16000))
         if max_samples:
             ds = ds.select(range(min(max_samples, len(ds))))
@@ -124,7 +126,9 @@ def transcribe_dataset(
         "transcription_time_s": [],
     }
 
-    print(f"Transcribing with model: {model_name}, language: {language}, config: {config_name}")
+    print(
+        f"Transcribing with model: {model_name}, language: {language}, config: {config_name}"
+    )
 
     def process_sample(sample):
         if use_url:
@@ -133,7 +137,12 @@ def transcribe_dataset(
             start = time.time()
             try:
                 transcription = transcribe_with_retry(
-                    model_name, None, sample, use_url=True, language=language, prompt=prompt
+                    model_name,
+                    None,
+                    sample,
+                    use_url=True,
+                    language=language,
+                    prompt=prompt,
                 )
             except Exception as e:
                 print(f"Failed to transcribe after retries: {e}")
@@ -156,7 +165,12 @@ def transcribe_dataset(
             start = time.time()
             try:
                 transcription = transcribe_with_retry(
-                    model_name, tmp_path, sample, use_url=False, language=language, prompt=prompt
+                    model_name,
+                    tmp_path,
+                    sample,
+                    use_url=False,
+                    language=language,
+                    prompt=prompt,
                 )
             except Exception as e:
                 print(f"Failed to transcribe after retries: {e}")
@@ -192,13 +206,20 @@ def transcribe_dataset(
     filtered = [
         (ref, pred, dur, time_s)
         for ref, pred, dur, time_s in zip(
-            results["references"], results["predictions"],
-            results["audio_length_s"], results["transcription_time_s"]
+            results["references"],
+            results["predictions"],
+            results["audio_length_s"],
+            results["transcription_time_s"],
         )
         if data_utils.is_target_text_in_range(ref)
     ]
     if filtered:
-        results["references"], results["predictions"], results["audio_length_s"], results["transcription_time_s"] = zip(*filtered)
+        (
+            results["references"],
+            results["predictions"],
+            results["audio_length_s"],
+            results["transcription_time_s"],
+        ) = zip(*filtered)
         results = {k: list(v) for k, v in results.items()}
 
     manifest_path = data_utils.write_manifest(
@@ -214,8 +235,12 @@ def transcribe_dataset(
 
     print("Results saved at path:", manifest_path)
 
-    norm_refs = [data_utils.ml_normalizer(r, lang=language) for r in results["references"]]
-    norm_preds = [data_utils.ml_normalizer(t, lang=language) for t in results["predictions"]]
+    norm_refs = [
+        data_utils.ml_normalizer(r, lang=language) for r in results["references"]
+    ]
+    norm_preds = [
+        data_utils.ml_normalizer(t, lang=language) for t in results["predictions"]
+    ]
     wer_metric = evaluate.load("wer")
     wer_refs, wer_preds = normalize_compound_pairs(norm_refs, norm_preds)
     wer = wer_metric.compute(references=wer_refs, predictions=wer_preds)
@@ -233,7 +258,9 @@ if __name__ == "__main__":
         description="Multilingual API Transcription Script with Concurrency"
     )
     parser.add_argument("--dataset_path", required=True)
-    parser.add_argument("--config_name", required=True, help="Dataset config name, e.g. 'fleurs_de'")
+    parser.add_argument(
+        "--config_name", required=True, help="Dataset config name, e.g. 'fleurs_de'"
+    )
     parser.add_argument("--language", required=True, help="Language code, e.g. 'de'")
     parser.add_argument("--split", default="test")
     parser.add_argument(
