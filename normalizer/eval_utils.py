@@ -1,10 +1,168 @@
 import os
 import glob
 import json
+import socket
+import urllib.request
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 
 from collections import defaultdict
 from kaldialign import batch_error_rate
+
+_SLACK_CHAT_POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage"
+
+
+def _format_slack_number(value, decimals=2):
+    if value is None:
+        return "n/a"
+    return f"{value:.{decimals}f}"
+
+
+def _chunk_slack_lines(lines, limit=2800):
+    chunks = []
+    current = []
+    current_len = 0
+    for line in lines:
+        next_len = len(line) + 1
+        if current and current_len + next_len > limit:
+            chunks.append("\n".join(current))
+            current = []
+            current_len = 0
+        current.append(line)
+        current_len += next_len
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
+
+
+def _build_slack_eval_payload(
+    channel,
+    directory,
+    result_files,
+    original_model_id,
+    composite_wer,
+    composite_audio_length,
+    composite_inference_time,
+    count_entries,
+    results,
+    multilingual,
+    language,
+):
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    model_lines = []
+    for model_key, total_wer in composite_wer.items():
+        avg_wer = total_wer / count_entries[model_key]
+        if composite_audio_length[model_key] is not None:
+            rtfx = composite_audio_length[model_key] / composite_inference_time[model_key]
+        else:
+            rtfx = None
+        model_label = original_model_id if original_model_id is not None else model_key
+        model_lines.append(
+            f"*{model_label}*: WER {_format_slack_number(avg_wer)}%, "
+            f"RTFx {_format_slack_number(rtfx)}"
+        )
+
+    dataset_ids = [key.split("|", 1)[1].strip() for key in results]
+    dataset_lines = []
+    for result_key, metrics in results.items():
+        model_label, dataset_id = [part.strip() for part in result_key.split("|", 1)]
+        if len(composite_wer) == 1:
+            prefix = dataset_id
+        else:
+            prefix = f"{model_label} / {dataset_id}"
+        line = f"- {prefix}: WER {_format_slack_number(metrics['wer'])}%"
+        if metrics["rtfx"] is not None:
+            line += f", RTFx {_format_slack_number(metrics['rtfx'])}"
+        dataset_lines.append(line)
+
+    metadata = [
+        f"*Results dir:* `{os.path.abspath(directory)}`",
+        f"*Result files:* {len(result_files)}",
+        f"*Datasets:* {len(dataset_ids)}",
+        f"*Language:* `{language}`",
+        f"*Multilingual:* `{multilingual}`",
+        f"*Finished:* {timestamp}",
+        f"*Host:* `{socket.gethostname()}`",
+    ]
+    for env_name in ("RESULTS_BUCKET", "SPACE", "FLAVOR", "ORG_NAME", "HF_JOB_ID"):
+        env_value = os.environ.get(env_name)
+        if env_value:
+            metadata.append(f"*{env_name}:* `{env_value}`")
+
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*ASR evaluation completed*\n" + "\n".join(model_lines),
+            },
+        },
+        {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(metadata)}},
+    ]
+    for chunk in _chunk_slack_lines(dataset_lines):
+        blocks.append(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "*Per-dataset results:*\n" + chunk},
+            }
+        )
+
+    return {
+        "channel": channel,
+        "text": "ASR evaluation completed: " + "; ".join(model_lines),
+        "blocks": blocks,
+    }
+
+
+def _post_slack_eval_summary(
+    directory,
+    result_files,
+    original_model_id,
+    composite_wer,
+    composite_audio_length,
+    composite_inference_time,
+    count_entries,
+    results,
+    multilingual,
+    language,
+):
+    token = os.environ.get("SLACK_BOT_TOKEN")
+    channel = os.environ.get("SLACK_CHANNEL_ID")
+    if not token or not channel:
+        return
+
+    payload = _build_slack_eval_payload(
+        channel,
+        directory,
+        result_files,
+        original_model_id,
+        composite_wer,
+        composite_audio_length,
+        composite_inference_time,
+        count_entries,
+        results,
+        multilingual,
+        language,
+    )
+    request = urllib.request.Request(
+        _SLACK_CHAT_POST_MESSAGE_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            response_body = response.read().decode("utf-8")
+        slack_response = json.loads(response_body)
+        if not slack_response.get("ok"):
+            error = slack_response.get("error", "unknown_error")
+            print(f"WARNING: Slack notification failed: {error}")
+    except Exception as exc:
+        print(f"WARNING: Slack notification failed: {exc}")
 
 
 def normalize_compound_pairs(refs, preds):
@@ -127,8 +285,20 @@ def write_manifest(
     )
 
     with open(manifest_path, "w", encoding="utf-8") as f:
-        for idx, (text, transcript, audio_length, transcription_time, audio_filepath) in enumerate(
-            zip(references, transcriptions, audio_length, transcription_time, audio_filepaths)
+        for idx, (
+            text,
+            transcript,
+            audio_length,
+            transcription_time,
+            audio_filepath,
+        ) in enumerate(
+            zip(
+                references,
+                transcriptions,
+                audio_length,
+                transcription_time,
+                audio_filepaths,
+            )
         ):
             datum = {
                 "audio_filepath": audio_filepath if audio_filepath else f"sample_{idx}",
@@ -141,7 +311,13 @@ def write_manifest(
     return manifest_path
 
 
-def score_results(directory: str, model_id: str = None, multilingual: bool = False, csv_only: bool = False, language: str = "en"):
+def score_results(
+    directory: str,
+    model_id: str = None,
+    multilingual: bool = False,
+    csv_only: bool = False,
+    language: str = "en",
+):
     """
     Scores all result files in a directory and returns a composite score over all evaluated datasets.
 
@@ -172,7 +348,8 @@ def score_results(directory: str, model_id: str = None, multilingual: bool = Fal
         print("Filtering models by id:", model_id)
         model_id = model_id.replace("/", "-")
         result_files = [
-            fp for fp in result_files
+            fp
+            for fp in result_files
             if f"/{model_id}/" in fp or f"MODEL_{model_id}_DATASET_" in fp
         ]
 
@@ -195,6 +372,7 @@ def score_results(directory: str, model_id: str = None, multilingual: bool = Fal
 
     # Compute WER results per dataset, and RTFx over all datasets
     from normalizer import data_utils  # deferred to avoid circular import
+
     results = {}
     wer_metric = None  # loaded lazily only when multilingual=True
 
@@ -217,6 +395,7 @@ def score_results(directory: str, model_id: str = None, multilingual: bool = Fal
             # TODO update to use kaldialign
             if wer_metric is None:
                 import evaluate
+
                 wer_metric = evaluate.load("wer")
             references, predictions = normalize_compound_pairs(references, predictions)
             wer = wer_metric.compute(references=references, predictions=predictions)
@@ -224,7 +403,7 @@ def score_results(directory: str, model_id: str = None, multilingual: bool = Fal
             # Use kaldialign batch_error_rate with merge_compounds=True so that
             # split compounds (e.g. "white paper" vs "whitepaper") count as
             # 0 errors in either direction.
-            refs_split  = [tuple(r.split()) for r in references]
+            refs_split = [tuple(r.split()) for r in references]
             preds_split = [tuple(p.split()) for p in predictions]
             r = batch_error_rate(refs_split, preds_split, merge_compounds=True)
             total_ins, total_del, total_sub = r["ins"], r["del"], r["sub"]
@@ -240,8 +419,18 @@ def score_results(directory: str, model_id: str = None, multilingual: bool = Fal
             audio_length = inference_time = rtfx = None
 
         result_key = f"{model_id_of_file} | {dataset_id}"
-        extra = {"ins": total_ins, "del": total_del, "sub": total_sub} if not multilingual else {}
-        results[result_key] = {"wer": wer, "audio_length": audio_length, "inference_time": inference_time, "rtfx": rtfx, **extra}
+        extra = (
+            {"ins": total_ins, "del": total_del, "sub": total_sub}
+            if not multilingual
+            else {}
+        )
+        results[result_key] = {
+            "wer": wer,
+            "audio_length": audio_length,
+            "inference_time": inference_time,
+            "rtfx": rtfx,
+            **extra,
+        }
 
     if not csv_only:
         print("*" * 80)
@@ -295,13 +484,22 @@ def score_results(directory: str, model_id: str = None, multilingual: bool = Fal
             "Scripted-US,Scripted-AU,Scripted-CA,Scripted-IN,"
             "Conversational-US003,Conversational-US004,Conversational-IN",
             {
-                "appen_scripted_filtered__american":                     ("Scripted-US",          "scripted"),
-                "appen_scripted_filtered__australian":                   ("Scripted-AU",          "scripted"),
-                "appen_scripted_filtered__canadian":                     ("Scripted-CA",          "scripted"),
-                "appen_scripted_filtered__indian":                       ("Scripted-IN",          "scripted"),
-                "appen_conversational_segmented_filtered__american_003": ("Conversational-US003", "conversational"),
-                "appen_conversational_segmented_filtered__american_004": ("Conversational-US004", "conversational"),
-                "appen_conversational_segmented_filtered__indian":       ("Conversational-IN",    "conversational"),
+                "appen_scripted_filtered__american": ("Scripted-US", "scripted"),
+                "appen_scripted_filtered__australian": ("Scripted-AU", "scripted"),
+                "appen_scripted_filtered__canadian": ("Scripted-CA", "scripted"),
+                "appen_scripted_filtered__indian": ("Scripted-IN", "scripted"),
+                "appen_conversational_segmented_filtered__american_003": (
+                    "Conversational-US003",
+                    "conversational",
+                ),
+                "appen_conversational_segmented_filtered__american_004": (
+                    "Conversational-US004",
+                    "conversational",
+                ),
+                "appen_conversational_segmented_filtered__indian": (
+                    "Conversational-IN",
+                    "conversational",
+                ),
             },
         ),
         (
@@ -310,25 +508,31 @@ def score_results(directory: str, model_id: str = None, multilingual: bool = Fal
             "model,Avg DataOcean WER,Avg Scripted,Avg Conversational,"
             "Scripted-US,Scripted-GB,Conversational-US,Conversational-GB",
             {
-                "dataocean_scripted_filtered__en_US":                  ("Scripted-US",       "scripted"),
-                "dataocean_scripted_filtered__en_GB":                  ("Scripted-GB",       "scripted"),
-                "dataocean_conversational_segmented_filtered__en_US":  ("Conversational-US", "conversational"),
-                "dataocean_conversational_segmented_filtered__en_GB":  ("Conversational-GB", "conversational"),
+                "dataocean_scripted_filtered__en_US": ("Scripted-US", "scripted"),
+                "dataocean_scripted_filtered__en_GB": ("Scripted-GB", "scripted"),
+                "dataocean_conversational_segmented_filtered__en_US": (
+                    "Conversational-US",
+                    "conversational",
+                ),
+                "dataocean_conversational_segmented_filtered__en_GB": (
+                    "Conversational-GB",
+                    "conversational",
+                ),
             },
         ),
         (
             "public",
-            None,   # always printed when public datasets are present
+            None,  # always printed when public datasets are present
             "model,RTFx,License,Size (B),# Languages,Encoder,Decoder,"
             "AMI WER,Earnings22 WER,Gigaspeech WER,LS Clean WER,LS Other WER,SPGISpeech WER,Voxpopuli WER",
             {
-                "ami_test":               ("AMI WER",        None),
-                "earnings22_test":        ("Earnings22 WER", None),
-                "gigaspeech_test":        ("Gigaspeech WER", None),
-                "librispeech_test.clean": ("LS Clean WER",   None),
-                "librispeech_test.other": ("LS Other WER",   None),
-                "spgispeech_test":        ("SPGISpeech WER", None),
-                "voxpopuli_test":         ("Voxpopuli WER",  None),
+                "ami_test": ("AMI WER", None),
+                "earnings22_test": ("Earnings22 WER", None),
+                "gigaspeech_test": ("Gigaspeech WER", None),
+                "librispeech_test.clean": ("LS Clean WER", None),
+                "librispeech_test.other": ("LS Other WER", None),
+                "spgispeech_test": ("SPGISpeech WER", None),
+                "voxpopuli_test": ("Voxpopuli WER", None),
             },
         ),
         (
@@ -369,43 +573,79 @@ def score_results(directory: str, model_id: str = None, multilingual: bool = Fal
                 wer_vals = [v for v in wer_vals if v is not None]
                 if wer_vals:
                     avg = round(sum(wer_vals) / len(wer_vals), 2)
-                    label = original_model_id if original_model_id is not None else model_key.strip()
+                    label = (
+                        original_model_id
+                        if original_model_id is not None
+                        else model_key.strip()
+                    )
                     print(f"avg WER ({label}) = {avg}")
 
         print(header)
 
         for model_key in composite_wer:
-            csv_model_label = original_model_id if original_model_id is not None else model_key
-            wer_vals = {col: find_wer_in(model_key, col, col_map) for col in csv_columns}
-            wer_cols = [str(wer_vals[col]) if wer_vals[col] is not None else "" for col in csv_columns]
+            csv_model_label = (
+                original_model_id if original_model_id is not None else model_key
+            )
+            wer_vals = {
+                col: find_wer_in(model_key, col, col_map) for col in csv_columns
+            }
+            wer_cols = [
+                str(wer_vals[col]) if wer_vals[col] is not None else ""
+                for col in csv_columns
+            ]
 
             is_private = any(grp is not None for _lbl, grp in col_map.values())
             if is_private:
-                scripted_wers       = [v for _ds, (lbl, grp) in col_map.items()
-                                        if grp == "scripted"       and (v := wer_vals.get(lbl)) is not None]
-                conversational_wers = [v for _ds, (lbl, grp) in col_map.items()
-                                        if grp == "conversational" and (v := wer_vals.get(lbl)) is not None]
-                all_wers            = [v for v in wer_vals.values() if v is not None]
-                avg_overall        = round(sum(all_wers) / len(all_wers), 2)            if all_wers else ""
-                avg_scripted       = round(sum(scripted_wers) / len(scripted_wers), 2)  if scripted_wers else ""
-                avg_conv           = round(sum(conversational_wers) / len(conversational_wers), 2) if conversational_wers else ""
-                print(f"{csv_model_label},{avg_overall},{avg_scripted},{avg_conv}," + ",".join(wer_cols))
+                scripted_wers = [
+                    v
+                    for _ds, (lbl, grp) in col_map.items()
+                    if grp == "scripted" and (v := wer_vals.get(lbl)) is not None
+                ]
+                conversational_wers = [
+                    v
+                    for _ds, (lbl, grp) in col_map.items()
+                    if grp == "conversational" and (v := wer_vals.get(lbl)) is not None
+                ]
+                all_wers = [v for v in wer_vals.values() if v is not None]
+                avg_overall = (
+                    round(sum(all_wers) / len(all_wers), 2) if all_wers else ""
+                )
+                avg_scripted = (
+                    round(sum(scripted_wers) / len(scripted_wers), 2)
+                    if scripted_wers
+                    else ""
+                )
+                avg_conv = (
+                    round(sum(conversational_wers) / len(conversational_wers), 2)
+                    if conversational_wers
+                    else ""
+                )
+                print(
+                    f"{csv_model_label},{avg_overall},{avg_scripted},{avg_conv},"
+                    + ",".join(wer_cols)
+                )
             else:
-                n_prefix = len(header.split(',')) - 1 - len(csv_columns)
+                n_prefix = len(header.split(",")) - 1 - len(csv_columns)
                 if family_key == "public":
                     family_audio = sum(
                         results[rk]["audio_length"]
                         for ds_substr in col_map
                         for rk in results
-                        if model_key.rstrip() in rk and ds_substr in rk and results[rk]["audio_length"] is not None
+                        if model_key.rstrip() in rk
+                        and ds_substr in rk
+                        and results[rk]["audio_length"] is not None
                     )
                     family_time = sum(
                         results[rk]["inference_time"]
                         for ds_substr in col_map
                         for rk in results
-                        if model_key.rstrip() in rk and ds_substr in rk and results[rk]["inference_time"] is not None
+                        if model_key.rstrip() in rk
+                        and ds_substr in rk
+                        and results[rk]["inference_time"] is not None
                     )
-                    rtfx_val = round(family_audio / family_time, 2) if family_time else ""
+                    rtfx_val = (
+                        round(family_audio / family_time, 2) if family_time else ""
+                    )
                     prefix_cols = [str(rtfx_val)] + [""] * (n_prefix - 1)
                 else:
                     prefix_cols = [""] * n_prefix
@@ -424,5 +664,18 @@ def score_results(directory: str, model_id: str = None, multilingual: bool = Fal
         else:
             if presence_substr in all_dataset_ids:
                 print_csv_block(header, col_map, family_key, family_name)
+
+    _post_slack_eval_summary(
+        directory,
+        result_files,
+        original_model_id,
+        composite_wer,
+        composite_audio_length,
+        composite_inference_time,
+        count_entries,
+        results,
+        multilingual,
+        language,
+    )
 
     return composite_wer, results

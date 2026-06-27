@@ -5,7 +5,12 @@ from typing import Optional
 
 from . import APIProvider, register
 
-MIME_MAP = {".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".flac": "audio/flac"}
+MIME_MAP = {
+    ".wav": "audio/wav",
+    ".mp3": "audio/mpeg",
+    ".m4a": "audio/mp4",
+    ".flac": "audio/flac",
+}
 
 
 @register("zoom")
@@ -33,8 +38,12 @@ class ZoomProvider(APIProvider):
             )
             with open(audio_file_path, "rb") as f:
                 audio_bytes = f.read()
-            mime = MIME_MAP.get(os.path.splitext(audio_file_path)[1].lower(), "audio/wav")
-            file_payload = f"data:{mime};base64,{base64.b64encode(audio_bytes).decode('ascii')}"
+            mime = MIME_MAP.get(
+                os.path.splitext(audio_file_path)[1].lower(), "audio/wav"
+            )
+            file_payload = (
+                f"data:{mime};base64,{base64.b64encode(audio_bytes).decode('ascii')}"
+            )
 
         if audio_duration <= 29.9:
             segmentation_mode = "none"
@@ -43,14 +52,19 @@ class ZoomProvider(APIProvider):
 
         resp = requests.post(
             self.ENDPOINT,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={"file": file_payload,
-                  "config": {
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "file": file_payload,
+                "config": {
                     "language": "en-US",
                     "segmentation_mode": segmentation_mode,
                     "experimental_feature": {"model_pro": True},
                     "timestamps": True,
-                  }},
+                },
+            },
             timeout=300,
         )
         resp.raise_for_status()

@@ -5,4 +5,5 @@ datasets
 jiwer
 regex
 num2words
+python-dotenv
 kaldialign==0.12.0

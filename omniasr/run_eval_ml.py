@@ -12,6 +12,7 @@ from tqdm import tqdm
 
 wer_metric = evaluate.load("wer")
 
+
 def main(args):
     CONFIG_NAME = args.config_name
     SPLIT_NAME = args.split
@@ -38,10 +39,7 @@ def main(args):
     else:
         device = torch.device("cpu")
 
-    pipeline = ASRInferencePipeline(
-        model_card=model_card,
-        device=device
-    )
+    pipeline = ASRInferencePipeline(model_card=model_card, device=device)
 
     MAX_AUDIO_SEC = 40  # Pipeline max audio length
 
@@ -79,16 +77,15 @@ def main(args):
         batch["audio_length_s"] = [
             len(audio["array"]) / audio["sampling_rate"] for audio in batch["audio"]
         ]
-        batch["audio_filepath"] = data_utils.extract_audio_filepaths_from_batch(batch, minibatch_size)
+        batch["audio_filepath"] = data_utils.extract_audio_filepaths_from_batch(
+            batch, minibatch_size
+        )
 
         # START TIMING
         start_time = time.time()
 
         # Inference with the appropriate language code
-        transcriptions = pipeline.transcribe(
-            audio_data,
-            batch_size=minibatch_size
-        )
+        transcriptions = pipeline.transcribe(audio_data, batch_size=minibatch_size)
 
         # END TIMING
         runtime = time.time() - start_time
@@ -96,7 +93,9 @@ def main(args):
         batch["transcription_time_s"] = minibatch_size * [runtime / minibatch_size]
 
         # Normalize with appropriate normalizer
-        batch["predictions"] = transcriptions  # raw; normalization applied at scoring time
+        batch["predictions"] = (
+            transcriptions  # raw; normalization applied at scoring time
+        )
 
         # Get raw references
         batch["references"] = [
@@ -127,9 +126,7 @@ def main(args):
     dataset = dataset.cast_column("audio", Audio(sampling_rate=16000))
 
     # Filter out empty references
-    dataset = dataset.filter(
-        lambda x: data_utils.is_target_text_in_range(get_text(x))
-    )
+    dataset = dataset.filter(lambda x: data_utils.is_target_text_in_range(get_text(x)))
 
     # Warmup
     if args.warmup_steps is not None:
@@ -145,14 +142,21 @@ def main(args):
         if args.streaming:
             warmup_dataset = warmup_dataset.take(num_warmup_samples)
         else:
-            warmup_dataset = warmup_dataset.select(range(min(num_warmup_samples, len(warmup_dataset))))
-        warmup_dataset = iter(warmup_dataset.map(benchmark, batch_size=args.batch_size, batched=True))
+            warmup_dataset = warmup_dataset.select(
+                range(min(num_warmup_samples, len(warmup_dataset)))
+            )
+        warmup_dataset = iter(
+            warmup_dataset.map(benchmark, batch_size=args.batch_size, batched=True)
+        )
         for _ in tqdm(warmup_dataset, desc="Warming up..."):
             continue
 
     # Run evaluation
     dataset = dataset.map(
-        benchmark, batch_size=args.batch_size, batched=True, remove_columns=["audio"],
+        benchmark,
+        batch_size=args.batch_size,
+        batched=True,
+        remove_columns=["audio"],
     )
 
     all_results = {
@@ -186,7 +190,9 @@ def main(args):
     wer_refs, wer_preds = normalize_compound_pairs(norm_refs, norm_preds)
     wer = wer_metric.compute(references=wer_refs, predictions=wer_preds)
     wer = round(100 * wer, 2)
-    rtfx = round(sum(all_results["audio_length_s"]) / sum(all_results["transcription_time_s"]), 2)
+    rtfx = round(
+        sum(all_results["audio_length_s"]) / sum(all_results["transcription_time_s"]), 2
+    )
     print(f"Dataset: {args.dataset}")
     print(f"Language: {LANGUAGE}")
     print(f"Config: {CONFIG_NAME}")

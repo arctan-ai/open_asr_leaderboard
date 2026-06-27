@@ -18,55 +18,67 @@ from concurrent.futures import ThreadPoolExecutor
 
 wer_metric = evaluate.load("wer")
 
+
 def read_config(component, engine_dir):
     engine_dir = Path(engine_dir)
-    config_path = engine_dir / component / 'config.json'
-    with open(config_path, 'r') as f:
+    config_path = engine_dir / component / "config.json"
+    with open(config_path, "r") as f:
         config = json.load(f)
     model_config = OrderedDict()
-    model_config.update(config['pretrained_config'])
-    model_config.update(config['build_config'])
+    model_config.update(config["pretrained_config"])
+    model_config.update(config["build_config"])
     return model_config
 
-class WhisperTRTLLM(object):
 
-    def __init__(self,
-                 engine_dir,
-                 assets_dir="assets",
-                 batch_size=64):
-        encoder_config = read_config('encoder', engine_dir)
-        decoder_config = read_config('decoder', engine_dir)
-        self.n_mels = encoder_config['n_mels']
-        self.num_languages = encoder_config['num_languages']
-        is_multilingual = (decoder_config['vocab_size'] >= 51865)
+class WhisperTRTLLM(object):
+    def __init__(self, engine_dir, assets_dir="assets", batch_size=64):
+        encoder_config = read_config("encoder", engine_dir)
+        decoder_config = read_config("decoder", engine_dir)
+        self.n_mels = encoder_config["n_mels"]
+        self.num_languages = encoder_config["num_languages"]
+        is_multilingual = decoder_config["vocab_size"] >= 51865
         if is_multilingual:
             tokenizer_name = "multilingual"
-            assert (Path(assets_dir) / "multilingual.tiktoken").exists(
-            ), "multilingual.tiktoken file is not existed in assets_dir"
+            assert (Path(assets_dir) / "multilingual.tiktoken").exists(), (
+                "multilingual.tiktoken file is not existed in assets_dir"
+            )
         else:
             tokenizer_name = "gpt2"
-            assert (Path(assets_dir) / "gpt2.tiktoken").exists(
-            ), "gpt2.tiktoken file is not existed in assets_dir"
-        self.text_prefix="<|startoftranscript|><|en|><|transcribe|><|notimestamps|>" if is_multilingual else "<|startoftranscript|><|notimestamps|>"
-        self.tokenizer = get_tokenizer(name=tokenizer_name,
-                                       num_languages=self.num_languages,
-                                       tokenizer_dir=assets_dir)
+            assert (Path(assets_dir) / "gpt2.tiktoken").exists(), (
+                "gpt2.tiktoken file is not existed in assets_dir"
+            )
+        self.text_prefix = (
+            "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>"
+            if is_multilingual
+            else "<|startoftranscript|><|notimestamps|>"
+        )
+        self.tokenizer = get_tokenizer(
+            name=tokenizer_name,
+            num_languages=self.num_languages,
+            tokenizer_dir=assets_dir,
+        )
         self.eot_id = self.tokenizer.encode(
-            "<|endoftext|>",
-            allowed_special=self.tokenizer.special_tokens_set)[0]
-        json_config = GptJsonConfig.parse_file(Path(engine_dir) / 'decoder' / 'config.json')
+            "<|endoftext|>", allowed_special=self.tokenizer.special_tokens_set
+        )[0]
+        json_config = GptJsonConfig.parse_file(
+            Path(engine_dir) / "decoder" / "config.json"
+        )
         assert json_config.model_config.supports_inflight_batching
-        runner_kwargs = dict(engine_dir=engine_dir,
-                                is_enc_dec=True,
-                                max_batch_size=batch_size,
-                                max_input_len=3000,
-                                max_output_len=96,
-                                max_beam_width=1,
-                                debug_mode=False,
-                                kv_cache_free_gpu_memory_fraction=0.9)
+        runner_kwargs = dict(
+            engine_dir=engine_dir,
+            is_enc_dec=True,
+            max_batch_size=batch_size,
+            max_input_len=3000,
+            max_output_len=96,
+            max_beam_width=1,
+            debug_mode=False,
+            kv_cache_free_gpu_memory_fraction=0.9,
+        )
         self.model_runner_cpp = ModelRunnerCpp.from_dir(**runner_kwargs)
 
-    def process_single_batch(self, mel_batch, decoder_input_ids, mel_input_lengths, max_new_tokens):
+    def process_single_batch(
+        self, mel_batch, decoder_input_ids, mel_input_lengths, max_new_tokens
+    ):
         outputs = self.model_runner_cpp.generate(
             batch_input_ids=decoder_input_ids,
             encoder_input_features=mel_batch,
@@ -76,84 +88,94 @@ class WhisperTRTLLM(object):
             pad_id=self.eot_id,
             num_beams=1,
             output_sequence_lengths=True,
-            return_dict=True
+            return_dict=True,
         )
-        
-        output_ids = outputs['output_ids'].cpu().numpy().tolist()
+
+        output_ids = outputs["output_ids"].cpu().numpy().tolist()
         texts = []
         for i in range(len(output_ids)):
             text = self.tokenizer.decode(output_ids[i][0]).strip()
-            text = re.sub(r'<\|.*?\|>', '', text)
+            text = re.sub(r"<\|.*?\|>", "", text)
             texts.append(text)
         return texts
-    
+
     def process_batch(self, mel, mel_input_lengths, num_threads=4, max_new_tokens=96):
         prompt_id = self.tokenizer.encode(
-            self.text_prefix, allowed_special=self.tokenizer.special_tokens_set)
+            self.text_prefix, allowed_special=self.tokenizer.special_tokens_set
+        )
         prompt_id = torch.tensor(prompt_id)
         batch_size = len(mel)
         decoder_input_ids = prompt_id.repeat(batch_size, 1)
 
         with torch.no_grad():
             if isinstance(mel, list):
-                mel = torch.stack([m.transpose(1, 2).type(torch.float16).squeeze(0) for m in mel])
+                mel = torch.stack(
+                    [m.transpose(1, 2).type(torch.float16).squeeze(0) for m in mel]
+                )
             else:
                 mel = mel.transpose(1, 2)
 
             num_threads = min(num_threads, batch_size)
             mel_batches = torch.split(mel, batch_size // num_threads)
-            mel_input_lengths_batches = torch.split(mel_input_lengths, batch_size // num_threads)
+            mel_input_lengths_batches = torch.split(
+                mel_input_lengths, batch_size // num_threads
+            )
 
             texts_list = []
             with ThreadPoolExecutor(max_workers=num_threads) as executor:
                 futures = []
                 for i, mel_batch in enumerate(mel_batches):
                     current_length = mel_batch.size(0)
-                    futures.append(executor.submit(
-                        self.process_single_batch,
-                        mel_batch,
-                        decoder_input_ids[:current_length],
-                        mel_input_lengths_batches[i],
-                        max_new_tokens
-                    ))
-                
+                    futures.append(
+                        executor.submit(
+                            self.process_single_batch,
+                            mel_batch,
+                            decoder_input_ids[:current_length],
+                            mel_input_lengths_batches[i],
+                            max_new_tokens,
+                        )
+                    )
+
                 for future in futures:
                     texts_list.extend(future.result())
-        
+
         return texts_list
+
 
 def longest_common_substring(s1, s2):
     len1, len2 = len(s1), len(s2)
     dp = [[0] * (len2 + 1) for _ in range(len1 + 1)]
-    
-    longest_length = 0  
-    end_index_s1 = 0 
+
+    longest_length = 0
+    end_index_s1 = 0
 
     for i in range(1, len1 + 1):
         for j in range(1, len2 + 1):
-            if s1[i - 1] == s2[j - 1]: 
+            if s1[i - 1] == s2[j - 1]:
                 dp[i][j] = dp[i - 1][j - 1] + 1
                 if dp[i][j] > longest_length:
                     longest_length = dp[i][j]
-                    end_index_s1 = i  
+                    end_index_s1 = i
             else:
-                dp[i][j] = 0 
+                dp[i][j] = 0
 
-    return s1[end_index_s1 - longest_length:end_index_s1]
+    return s1[end_index_s1 - longest_length : end_index_s1]
+
 
 def chunk_audio(audio, chunk_length, overlap_length, sample_rate):
     chunk_size = int(chunk_length * sample_rate)
     overlap_size = int(overlap_length * sample_rate)
-    
+
     chunks = []
     start = 0
-    
+
     while start < len(audio):
         end = min(start + chunk_size, len(audio))
         chunks.append(audio[start:end])
         start += chunk_size - overlap_size
-    
+
     return chunks
+
 
 def main(args):
     asr_model = WhisperTRTLLM(engine_dir=args.model_id)
@@ -166,10 +188,12 @@ def main(args):
         audios, audio_index = [], []
 
         chunk_length = 25
-        overlap_length = 5 
+        overlap_length = 5
         for i, audio in enumerate(audios_origin):
             if len(audio) > max_duration * sample_rate:
-                audio_chunks = chunk_audio(audio, chunk_length, overlap_length, sample_rate)
+                audio_chunks = chunk_audio(
+                    audio, chunk_length, overlap_length, sample_rate
+                )
                 for chunk in audio_chunks:
                     audios.append(chunk)
                     audio_index.append(i)
@@ -183,18 +207,22 @@ def main(args):
         longest_duration = int(sample_rate * max_duration)
 
         features = [
-            log_mel_spectrogram(wave,
-                                asr_model.n_mels,
-                                padding=longest_duration - wave.shape[-1],
-                                device='cuda').unsqueeze(0)
+            log_mel_spectrogram(
+                wave,
+                asr_model.n_mels,
+                padding=longest_duration - wave.shape[-1],
+                device="cuda",
+            ).unsqueeze(0)
             for wave in audios
         ]
 
-        features_input_lengths = torch.tensor([f.shape[2] for f in features],
-                                              dtype=torch.int32,
-                                              device='cuda')
+        features_input_lengths = torch.tensor(
+            [f.shape[2] for f in features], dtype=torch.int32, device="cuda"
+        )
 
-        texts_origin = asr_model.process_batch(features, features_input_lengths, num_threads=4)
+        texts_origin = asr_model.process_batch(
+            features, features_input_lengths, num_threads=4
+        )
 
         texts = []
         for i in range(minibatch_size):
@@ -202,37 +230,50 @@ def main(args):
             for j in range(len(texts_origin)):
                 if audio_index[j] == i:
                     text_chunks.append(texts_origin[j])
-            
+
             if len(text_chunks) > 1:
                 merged_text = text_chunks[0]
                 for t in text_chunks[1:]:
                     lcs = longest_common_substring(merged_text, t)
-                    merged_text += t[len(lcs):]
-                    
+                    merged_text += t[len(lcs) :]
+
                 texts.append(merged_text)
             else:
                 texts.append(text_chunks[0])
         # END TIMING
         runtime = time.time() - start_time
 
-        print(f"Batch size: {minibatch_size}, Time taken: {runtime:.2f} s, texts_origin_len: {len(texts_origin)}, texts_len: {len(texts)}")
+        print(
+            f"Batch size: {minibatch_size}, Time taken: {runtime:.2f} s, texts_origin_len: {len(texts_origin)}, texts_len: {len(texts)}"
+        )
         # normalize by minibatch size since we want the per-sample time
         batch["transcription_time_s"] = minibatch_size * [runtime / minibatch_size]
 
         batch["predictions"] = texts  # raw; normalization applied at scoring time
-        batch["references"] = batch["original_text"]  # raw; normalization applied at scoring time
+        batch["references"] = batch[
+            "original_text"
+        ]  # raw; normalization applied at scoring time
         return batch
 
     if args.warmup_steps is not None:
         dataset = data_utils.load_data(args)
-        dataset = data_utils.prepare_data(dataset)
+        dataset = data_utils.prepare_data(dataset, args=args)
 
         num_warmup_samples = args.warmup_steps * args.batch_size
         if args.streaming:
             warmup_dataset = dataset.take(num_warmup_samples)
         else:
-            warmup_dataset = dataset.select(range(min(num_warmup_samples, len(dataset))))
-        warmup_dataset = iter(warmup_dataset.map(benchmark, batch_size=args.batch_size, batched=True, fn_kwargs={"min_new_tokens": args.max_new_tokens}))
+            warmup_dataset = dataset.select(
+                range(min(num_warmup_samples, len(dataset)))
+            )
+        warmup_dataset = iter(
+            warmup_dataset.map(
+                benchmark,
+                batch_size=args.batch_size,
+                batched=True,
+                fn_kwargs={"min_new_tokens": args.max_new_tokens},
+            )
+        )
 
         for _ in tqdm(warmup_dataset, desc="Warming up..."):
             continue
@@ -244,10 +285,13 @@ def main(args):
             dataset = dataset.take(args.max_eval_samples)
         else:
             dataset = dataset.select(range(min(args.max_eval_samples, len(dataset))))
-    dataset = data_utils.prepare_data(dataset)
+    dataset = data_utils.prepare_data(dataset, args=args)
 
     dataset = dataset.map(
-        benchmark, batch_size=args.batch_size, batched=True, remove_columns=["audio"],
+        benchmark,
+        batch_size=args.batch_size,
+        batched=True,
+        remove_columns=["audio"],
     )
 
     all_results = {
@@ -276,11 +320,11 @@ def main(args):
 
     norm_refs = [data_utils.normalizer(r) for r in all_results["references"]]
     norm_preds = [data_utils.normalizer(p) for p in all_results["predictions"]]
-    wer = wer_metric.compute(
-        references=norm_refs, predictions=norm_preds
-    )
+    wer = wer_metric.compute(references=norm_refs, predictions=norm_preds)
     wer = round(100 * wer, 2)
-    rtfx = round(sum(all_results["audio_length_s"]) / sum(all_results["transcription_time_s"]), 2)
+    rtfx = round(
+        sum(all_results["audio_length_s"]) / sum(all_results["transcription_time_s"]), 2
+    )
     print("WER:", wer, "%", "RTFx:", rtfx)
 
 
@@ -347,6 +391,8 @@ if __name__ == "__main__":
         default=10,
         help="Number of warm-up steps to run before launching the timed runs.",
     )
+    data_utils.add_audio_preprocessor_args(parser)
+
     args = parser.parse_args()
 
     main(args)

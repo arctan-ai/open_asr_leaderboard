@@ -49,7 +49,5 @@ class AssemblyAIProvider(APIProvider):
             transcript = transcriber.transcribe(audio_file_path, config=config)
 
         if transcript.status == aai.TranscriptStatus.error:
-            raise PermanentError(
-                f"AssemblyAI transcription error: {transcript.error}"
-            )
+            raise PermanentError(f"AssemblyAI transcription error: {transcript.error}")
         return transcript.text or ""

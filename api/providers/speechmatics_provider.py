@@ -58,9 +58,7 @@ class SpeechmaticsProvider(APIProvider):
                 return transcript
             except HTTPStatusError as e:
                 if e.response.status_code == 401:
-                    raise ValueError(
-                        "Invalid Speechmatics API credentials"
-                    ) from e
+                    raise ValueError("Invalid Speechmatics API credentials") from e
                 elif e.response.status_code == 400:
                     raise ValueError(
                         f"Speechmatics API responded with 400 Bad request: {e.response.text}"
@@ -77,9 +75,12 @@ class SpeechmaticsProvider(APIProvider):
                         and len(status["job"]["errors"]) > 0
                     ):
                         errors = status["job"]["errors"]
-                        if "message" in errors[-1] and "failed to fetch file" in errors[-1]["message"]:
-                            raise PermanentError(f"could not fetch URL {audio_url}, not retrying") from e
+                        if (
+                            "message" in errors[-1]
+                            and "failed to fetch file" in errors[-1]["message"]
+                        ):
+                            raise PermanentError(
+                                f"could not fetch URL {audio_url}, not retrying"
+                            ) from e
 
-                raise Exception(
-                    f"Speechmatics transcription failed: {str(e)}"
-                ) from e
+                raise Exception(f"Speechmatics transcription failed: {str(e)}") from e

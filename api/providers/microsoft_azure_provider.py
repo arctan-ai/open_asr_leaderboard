@@ -6,7 +6,12 @@ from typing import Optional
 
 from . import APIProvider, register
 
-MIME_MAP = {".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".flac": "audio/flac"}
+MIME_MAP = {
+    ".wav": "audio/wav",
+    ".mp3": "audio/mpeg",
+    ".m4a": "audio/mp4",
+    ".flac": "audio/flac",
+}
 
 
 @register("microsoft")
@@ -31,7 +36,7 @@ class MicrosoftAzureProvider(APIProvider):
         sample: dict,
         use_url: bool = False,
         language: str = "en",
-        prompt: Optional[str] = None, 
+        prompt: Optional[str] = None,
     ) -> str:
         api_key = os.getenv("AZURE_API_KEY")
         if not api_key or api_key == "your_api_key":
@@ -60,7 +65,9 @@ class MicrosoftAzureProvider(APIProvider):
                 ("audio", ("audio.wav", audio_data, "audio/wav")),
             ]
         else:
-            mime = MIME_MAP.get(os.path.splitext(audio_file_path)[1].lower(), "audio/wav")
+            mime = MIME_MAP.get(
+                os.path.splitext(audio_file_path)[1].lower(), "audio/wav"
+            )
             files = [
                 ("definition", (None, json.dumps(definition))),
                 ("audio", (audio_file_path, open(audio_file_path, "rb"), mime)),

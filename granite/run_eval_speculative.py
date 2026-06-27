@@ -16,7 +16,7 @@ from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq, models
 assert hasattr(models, "granite_speech")
 
 wer_metric = evaluate.load("wer")
-torch.set_float32_matmul_precision('high')
+torch.set_float32_matmul_precision("high")
 
 
 def main(args):
@@ -24,11 +24,15 @@ def main(args):
 
     processor = AutoProcessor.from_pretrained(args.model_id)
     tokenizer = processor.tokenizer
-    model = AutoModelForSpeechSeq2Seq.from_pretrained(args.model_id, torch_dtype=torch.bfloat16).to(device)
+    model = AutoModelForSpeechSeq2Seq.from_pretrained(
+        args.model_id, torch_dtype=torch.bfloat16
+    ).to(device)
     model.eval()
-    print(f"Model size: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B parameters")
+    print(
+        f"Model size: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B parameters"
+    )
 
-    logits_scaling = getattr(model.language_model.config, 'logits_scaling', 1.0)
+    logits_scaling = getattr(model.language_model.config, "logits_scaling", 1.0)
 
     # ========== Chat Template Setup ==========
     text_instruction = "<|audio|>can you transcribe the speech into a written format?"
@@ -37,7 +41,9 @@ def main(args):
     message = [
         {"role": "user", "content": text_instruction},
     ]
-    text_prompt = tokenizer.apply_chat_template(message, tokenize=False, add_generation_prompt=True)
+    text_prompt = tokenizer.apply_chat_template(
+        message, tokenize=False, add_generation_prompt=True
+    )
 
     # Derive prefix and suffix from the formatted prompt
     prompt_prefix, prompt_suffix = text_prompt.split("<|audio|>")
@@ -57,11 +63,17 @@ def main(args):
     def ctc_decode(audios):
         """CTC decode with entropy-based confidence."""
         texts = [text_prompt] * len(audios)
-        model_inputs = processor(texts, audios, device=device, return_tensors="pt").to(device)
+        model_inputs = processor(texts, audios, device=device, return_tensors="pt").to(
+            device
+        )
 
-        with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
+        with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
             encoder_output = model.encoder(model_inputs["input_features"])
-            embeddings = encoder_output.last_hidden_state if hasattr(encoder_output, 'last_hidden_state') else encoder_output
+            embeddings = (
+                encoder_output.last_hidden_state
+                if hasattr(encoder_output, "last_hidden_state")
+                else encoder_output
+            )
             ctc_logits = model.encoder.out(embeddings)
             ctc_probs = F.softmax(ctc_logits.float(), dim=-1)
 
@@ -72,8 +84,8 @@ def main(args):
         for i, idx in enumerate(idx_batch):
             dedup = torch.unique_consecutive(idx, dim=-1)
             non_blank = dedup[dedup > 0].tolist()
-            ctc_texts.append(''.join(chr(c) for c in non_blank))
-            ctc_entropies.append(entropy[i].max().item() if non_blank else float('inf'))
+            ctc_texts.append("".join(chr(c) for c in non_blank))
+            ctc_entropies.append(entropy[i].max().item() if non_blank else float("inf"))
             embed_lengths.append(len(audios[i]) // HOP_LENGTH // 2 + 1)
 
         return ctc_texts, ctc_entropies, embeddings, embed_lengths
@@ -86,18 +98,30 @@ def main(args):
         ctc_token_ids = []
         for text in ctc_texts:
             text = text.strip() if text else ""
-            ctc_token_ids.append(tokenizer.encode(text, add_special_tokens=False) if text else [])
+            ctc_token_ids.append(
+                tokenizer.encode(text, add_special_tokens=False) if text else []
+            )
 
-        with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
+        with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
             audio_embeds = model.projector(embeddings)
         max_proj_len = audio_embeds.shape[1]
 
-        window_size, downsample_rate = model.config.window_size, model.config.downsample_rate
+        window_size, downsample_rate = (
+            model.config.window_size,
+            model.config.downsample_rate,
+        )
         num_queries = window_size // downsample_rate
-        proj_lengths = [min(math.ceil(enc_len / window_size) * num_queries, max_proj_len) for enc_len in embed_lengths]
+        proj_lengths = [
+            min(math.ceil(enc_len / window_size) * num_queries, max_proj_len)
+            for enc_len in embed_lengths
+        ]
 
         if not any(ctc_token_ids):
-            return [(False, ctc_texts[i]) for i in range(batch_sz)], audio_embeds, proj_lengths
+            return (
+                [(False, ctc_texts[i]) for i in range(batch_sz)],
+                audio_embeds,
+                proj_lengths,
+            )
 
         audio_token_id = model.config.audio_token_id
         all_input_ids, prompt_lens, audio_ranges = [], [], []
@@ -110,19 +134,25 @@ def main(args):
             all_input_ids.append(prompt_part + ctc_token_ids[i])
 
         max_len = max(len(ids) for ids in all_input_ids)
-        padded_ids = torch.full((batch_sz, max_len), tokenizer.pad_token_id, dtype=torch.long, device=device)
+        padded_ids = torch.full(
+            (batch_sz, max_len), tokenizer.pad_token_id, dtype=torch.long, device=device
+        )
         attn_mask = torch.zeros(batch_sz, max_len, dtype=torch.long, device=device)
         for i, ids in enumerate(all_input_ids):
-            padded_ids[i, :len(ids)] = torch.tensor(ids, dtype=torch.long, device=device)
-            attn_mask[i, :len(ids)] = 1
+            padded_ids[i, : len(ids)] = torch.tensor(
+                ids, dtype=torch.long, device=device
+            )
+            attn_mask[i, : len(ids)] = 1
 
         inputs_embeds = model.language_model.get_input_embeddings()(padded_ids)
         for i in range(batch_sz):
             s, e = audio_ranges[i]
-            inputs_embeds[i, s:e, :] = audio_embeds[i, :e-s, :]
+            inputs_embeds[i, s:e, :] = audio_embeds[i, : e - s, :]
 
-        with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
-            hidden = model.language_model.model(attention_mask=attn_mask, inputs_embeds=inputs_embeds, use_cache=False).last_hidden_state
+        with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+            hidden = model.language_model.model(
+                attention_mask=attn_mask, inputs_embeds=inputs_embeds, use_cache=False
+            ).last_hidden_state
 
         # Gather hidden states at verification positions
         sample_idx, pos_idx, ctc_flat = [], [], []
@@ -145,11 +175,18 @@ def main(args):
             offset += len(ctc_tokens)
 
         if pos_idx:
-            gathered = hidden[torch.tensor(sample_idx, device=device), torch.tensor(pos_idx, device=device), :]
-            with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
+            gathered = hidden[
+                torch.tensor(sample_idx, device=device),
+                torch.tensor(pos_idx, device=device),
+                :,
+            ]
+            with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
                 logits = model.language_model.lm_head(gathered) / logits_scaling
             probs = F.softmax(logits.float(), dim=-1)
-            ctc_probs = probs[torch.arange(len(ctc_flat), device=device), torch.tensor(ctc_flat, device=device)]
+            ctc_probs = probs[
+                torch.arange(len(ctc_flat), device=device),
+                torch.tensor(ctc_flat, device=device),
+            ]
 
         results = []
         for i in range(batch_sz):
@@ -174,34 +211,48 @@ def main(args):
         all_embeds, all_lengths = [], []
 
         for i in indices:
-            sample_embeds = audio_embeds[i, :proj_lengths[i], :].unsqueeze(0)
-            combined = torch.cat([cached_prefix_embeds, sample_embeds, cached_suffix_embeds], dim=1)
+            sample_embeds = audio_embeds[i, : proj_lengths[i], :].unsqueeze(0)
+            combined = torch.cat(
+                [cached_prefix_embeds, sample_embeds, cached_suffix_embeds], dim=1
+            )
             all_embeds.append(combined.squeeze(0))
             all_lengths.append(combined.shape[1])
 
         max_len = max(all_lengths)
-        padded = torch.zeros(batch_sz, max_len, hidden_dim, device=device, dtype=audio_embeds.dtype)
+        padded = torch.zeros(
+            batch_sz, max_len, hidden_dim, device=device, dtype=audio_embeds.dtype
+        )
         attn_mask = torch.zeros(batch_sz, max_len, dtype=torch.long, device=device)
         for i, (emb, length) in enumerate(zip(all_embeds, all_lengths)):
-            padded[i, max_len - length:] = emb
-            attn_mask[i, max_len - length:] = 1
+            padded[i, max_len - length :] = emb
+            attn_mask[i, max_len - length :] = 1
 
         outputs = model.language_model.generate(
-            inputs_embeds=padded, attention_mask=attn_mask,
-            bos_token_id=tokenizer.bos_token_id, pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id, max_new_tokens=args.max_new_tokens,
-            num_beams=args.num_beams, early_stopping=args.num_beams > 1,
-            do_sample=False, use_cache=True
+            inputs_embeds=padded,
+            attention_mask=attn_mask,
+            bos_token_id=tokenizer.bos_token_id,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            max_new_tokens=args.max_new_tokens,
+            num_beams=args.num_beams,
+            early_stopping=args.num_beams > 1,
+            do_sample=False,
+            use_cache=True,
         )
 
-        return [tokenizer.decode(outputs[i], skip_special_tokens=True) for i in range(batch_sz)]
+        return [
+            tokenizer.decode(outputs[i], skip_special_tokens=True)
+            for i in range(batch_sz)
+        ]
 
     def benchmark(batch):
         audios = [audio["array"] for audio in batch["audio"]]
         batch_sz = len(audios)
         sampling_rate = batch["audio"][0]["sampling_rate"]
         batch["audio_length_s"] = [len(audio) / sampling_rate for audio in audios]
-        batch["audio_filepath"] = data_utils.extract_audio_filepaths_from_batch(batch, batch_sz)
+        batch["audio_filepath"] = data_utils.extract_audio_filepaths_from_batch(
+            batch, batch_sz
+        )
 
         start_time = time.time()
 
@@ -224,7 +275,9 @@ def main(args):
             verify_lens = [embed_lengths[i] for i in verify_idx]
             verify_texts = [ctc_texts[i] for i in verify_idx]
 
-            results, audio_embeds, proj_lengths = verify(verify_texts, verify_emb, verify_lens)
+            results, audio_embeds, proj_lengths = verify(
+                verify_texts, verify_emb, verify_lens
+            )
 
             fail_idx = []
             for j, (accepted, text) in enumerate(results):
@@ -244,7 +297,9 @@ def main(args):
 
         batch["transcription_time_s"] = [runtime / batch_sz] * batch_sz
         batch["predictions"] = predictions  # raw; normalization applied at scoring time
-        batch["references"] = batch["original_text"]  # raw; normalization applied at scoring time
+        batch["references"] = batch[
+            "original_text"
+        ]  # raw; normalization applied at scoring time
         return batch
 
     # Load and process dataset
@@ -252,35 +307,58 @@ def main(args):
     if args.max_eval_samples is not None and args.max_eval_samples > 0:
         print(f"Subsampling to {args.max_eval_samples} samples")
         dataset = dataset.select(range(min(args.max_eval_samples, len(dataset))))
-    dataset = data_utils.prepare_data(dataset)
+    dataset = data_utils.prepare_data(dataset, args=args)
 
-    dataset = dataset.map(benchmark, batch_size=args.batch_size, batched=True, remove_columns=["audio"], desc="Processing")
+    dataset = dataset.map(
+        benchmark,
+        batch_size=args.batch_size,
+        batched=True,
+        remove_columns=["audio"],
+        desc="Processing",
+    )
 
-    all_results = {"audio_length_s": [], "transcription_time_s": [], "predictions": [], "references": [], "audio_filepath": []}
+    all_results = {
+        "audio_length_s": [],
+        "transcription_time_s": [],
+        "predictions": [],
+        "references": [],
+        "audio_filepath": [],
+    }
     for result in tqdm(dataset, desc="Samples"):
         for key in all_results:
             all_results[key].append(result[key])
 
     # Write results
     manifest_path = data_utils.write_manifest(
-        all_results["references"], all_results["predictions"], args.model_id,
-        args.dataset_path, args.dataset, args.split,
-        audio_length=all_results["audio_length_s"], transcription_time=all_results["transcription_time_s"],
+        all_results["references"],
+        all_results["predictions"],
+        args.model_id,
+        args.dataset_path,
+        args.dataset,
+        args.split,
+        audio_length=all_results["audio_length_s"],
+        transcription_time=all_results["transcription_time_s"],
         audio_filepaths=all_results["audio_filepath"],
     )
     print("Results saved at:", os.path.abspath(manifest_path))
 
     norm_refs = [data_utils.normalizer(r) for r in all_results["references"]]
     norm_preds = [data_utils.normalizer(p) for p in all_results["predictions"]]
-    wer = round(100 * wer_metric.compute(references=norm_refs, predictions=norm_preds), 2)
-    rtfx = round(sum(all_results["audio_length_s"]) / sum(all_results["transcription_time_s"]), 2)
+    wer = round(
+        100 * wer_metric.compute(references=norm_refs, predictions=norm_preds), 2
+    )
+    rtfx = round(
+        sum(all_results["audio_length_s"]) / sum(all_results["transcription_time_s"]), 2
+    )
     print(f"WER: {wer}%, RTFx: {rtfx}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_id", type=str, required=True)
-    parser.add_argument("--dataset_path", type=str, default="hf-audio/open-asr-leaderboard")
+    parser.add_argument(
+        "--dataset_path", type=str, default="hf-audio/open-asr-leaderboard"
+    )
     parser.add_argument("--dataset", type=str, required=True)
     parser.add_argument("--split", type=str, default="test")
     parser.add_argument("--device", type=int, default=-1)
@@ -290,6 +368,12 @@ if __name__ == "__main__":
     parser.add_argument("--num_beams", type=int, default=1)
     parser.add_argument("--confidence_threshold", type=float, default=0.01)
     parser.add_argument("--ctc_threshold", type=float, default=0.5)
-    parser.add_argument("--streaming", action="store_true", help="Stream the dataset lazily over the network instead of downloading it in full before the evaluation.")
+    parser.add_argument(
+        "--streaming",
+        action="store_true",
+        help="Stream the dataset lazily over the network instead of downloading it in full before the evaluation.",
+    )
+    data_utils.add_audio_preprocessor_args(parser)
+
     args = parser.parse_args()
     main(args)
