@@ -11,6 +11,7 @@ from .streaming_utils import build_query_url, compact_text, connect_websocket, p
 
 ASSEMBLY_STREAMING_ENDPOINT = "wss://streaming.assemblyai.com/v3/ws"
 STREAMING_MODEL_MAP = {"universal-3-pro": "universal-3-5-pro"}
+STREAMING_CHUNK_MS = 50
 TERMINATION_TIMEOUT_S = 30
 
 
@@ -44,10 +45,17 @@ async def _transcribe_streaming(
 
         receiver = asyncio.create_task(receive_messages())
         try:
-            for chunk in pcm16_chunks(audio_file_path):
+            for chunk in pcm16_chunks(audio_file_path, chunk_ms=STREAMING_CHUNK_MS):
                 await ws.send(chunk)
+                await asyncio.sleep(STREAMING_CHUNK_MS / 1000)
             await ws.send(json.dumps({"type": "Terminate"}))
-            await asyncio.wait_for(receiver, timeout=TERMINATION_TIMEOUT_S)
+            try:
+                await asyncio.wait_for(receiver, timeout=TERMINATION_TIMEOUT_S)
+            except asyncio.TimeoutError as exc:
+                raise TimeoutError(
+                    f"AssemblyAI streaming termination timed out after "
+                    f"{TERMINATION_TIMEOUT_S}s"
+                ) from exc
         finally:
             if not receiver.done():
                 receiver.cancel()

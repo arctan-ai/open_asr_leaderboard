@@ -14,8 +14,10 @@ SONIOX_API_BASE_URL = "https://api.soniox.com"
 SONIOX_STREAMING_ENDPOINT = "wss://stt-rt.soniox.com/transcribe-websocket"
 DEFAULT_MODEL = "stt-async-v5"
 STREAMING_MODEL_MAP = {"stt-async-v5": "stt-rt-v5"}
+STREAMING_CHUNK_MS = 100
 POLL_INTERVAL_S = 1
 POLL_TIMEOUT_S = 600
+FINISH_TIMEOUT_S = 30
 
 
 def _render_tokens(tokens: list[dict]) -> str:
@@ -115,29 +117,39 @@ async def _transcribe_streaming(
 
     async with connect_websocket(SONIOX_STREAMING_ENDPOINT) as ws:
         await ws.send(json.dumps(config))
-        for chunk in pcm16_chunks(audio_file_path):
-            await ws.send(chunk)
-        await ws.send("")
 
-        async for message in ws:
-            try:
-                data = json.loads(message)
-            except json.JSONDecodeError:
-                continue
+        async def receive_messages():
+            async for message in ws:
+                try:
+                    data = json.loads(message)
+                except json.JSONDecodeError:
+                    continue
 
-            if data.get("error_code") is not None:
-                raise PermanentError(
-                    f"Soniox streaming error {data.get('error_code')}: "
-                    f"{data.get('error_message', 'unknown')}"
-                )
+                if data.get("error_code") is not None:
+                    raise PermanentError(
+                        f"Soniox streaming error {data.get('error_code')}: "
+                        f"{data.get('error_message', 'unknown')}"
+                    )
 
-            for token in data.get("tokens", []):
-                text = str(token.get("text", ""))
-                if token.get("is_final") and text and text != "<end>":
-                    final_text_parts.append(text)
+                for token in data.get("tokens", []):
+                    text = str(token.get("text", ""))
+                    if token.get("is_final") and text and text != "<end>":
+                        final_text_parts.append(text)
 
-            if data.get("finished"):
-                break
+                if data.get("finished"):
+                    return
+
+        receiver = asyncio.create_task(receive_messages())
+        try:
+            for chunk in pcm16_chunks(audio_file_path, chunk_ms=STREAMING_CHUNK_MS):
+                await ws.send(chunk)
+                await asyncio.sleep(STREAMING_CHUNK_MS / 1000)
+            await ws.send("")
+            await asyncio.wait_for(receiver, timeout=FINISH_TIMEOUT_S)
+        finally:
+            if not receiver.done():
+                receiver.cancel()
+            await ws.close()
 
     return compact_text(final_text_parts)
 
