@@ -14,6 +14,7 @@ export SPEECHMATICS_API_KEY="your_api_key"
 export RESON8_API_KEY="your_api_key"
 export AZURE_API_KEY="your_api_key"
 export SONIOX_API_KEY="your_api_key"
+export DEEPGRAM_API_KEY="your_api_key"
 
 # Configuration
 MODEL_IDs=(
@@ -24,6 +25,7 @@ MODEL_IDs=(
     # "elevenlabs/scribe_v2"
     # "speechmatics/enhanced"
     # "soniox/stt-async-v5"
+    # "deepgram/nova-3"
     "reson8/resonant-1"
     "reson8/resonant-1-flash"
     "microsoft/azure-speech-05-2026"

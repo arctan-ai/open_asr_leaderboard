@@ -57,6 +57,7 @@ from . import assemblyai_provider
 # from . import revai_provider
 # from . import aquavoice_provider
 # from . import zoom_provider
+from . import deepgram_provider
 from . import smallest_provider
 from . import soniox_provider
 # from . import reson8_provider

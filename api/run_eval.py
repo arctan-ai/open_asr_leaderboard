@@ -234,7 +234,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model_name",
         required=True,
-        help="Prefix model name with provider prefix (e.g., 'assembly/', 'smallestai/', or 'soniox/')",
+        help="Prefix model name with provider prefix (e.g., 'assembly/', 'smallestai/', 'soniox/', or 'deepgram/')",
     )
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument(
