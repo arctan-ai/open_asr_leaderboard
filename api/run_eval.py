@@ -115,9 +115,9 @@ def transcribe_dataset(
         ds = audio_rows
     else:
         ds = datasets.load_dataset(dataset_path, dataset, split=split, streaming=False)
-        ds = data_utils.prepare_data(ds, args=args)
         if max_samples:
-            ds = ds.take(max_samples)
+            ds = ds.select(range(min(max_samples, len(ds))))
+        ds = data_utils.prepare_data(ds, args=args)
 
     results = {
         "references": [],
@@ -211,6 +211,17 @@ def transcribe_dataset(
 
     print("WER:", wer_percent, "%")
     print("RTFx:", rtfx)
+    data_utils.post_slack_single_run_summary(
+        manifest_path=manifest_path,
+        model_name=model_name,
+        dataset_path=dataset_path,
+        dataset_name=dataset,
+        split=split,
+        wer_percent=wer_percent,
+        rtfx=rtfx,
+        num_samples=len(results["references"]),
+        audio_preprocessor=getattr(args, "audio_preprocessor", "none"),
+    )
 
 
 if __name__ == "__main__":
@@ -246,14 +257,36 @@ if __name__ == "__main__":
     if args.use_url and args.audio_preprocessor != "none":
         parser.error("--audio_preprocessor requires local audio; do not use --use_url")
 
-    transcribe_dataset(
-        dataset_path=args.dataset_path,
-        dataset=args.dataset,
-        split=args.split,
+    data_utils.post_slack_run_started(
         model_name=args.model_name,
-        use_url=args.use_url,
+        dataset_path=args.dataset_path,
+        dataset_name=args.dataset,
+        split=args.split,
         max_samples=args.max_samples,
         max_workers=args.max_workers,
-        prompt=args.prompt,
-        args=args,
+        audio_preprocessor=args.audio_preprocessor,
     )
+    try:
+        transcribe_dataset(
+            dataset_path=args.dataset_path,
+            dataset=args.dataset,
+            split=args.split,
+            model_name=args.model_name,
+            use_url=args.use_url,
+            max_samples=args.max_samples,
+            max_workers=args.max_workers,
+            prompt=args.prompt,
+            args=args,
+        )
+    except Exception as exc:
+        data_utils.post_slack_run_failed(
+            model_name=args.model_name,
+            dataset_path=args.dataset_path,
+            dataset_name=args.dataset,
+            split=args.split,
+            max_samples=args.max_samples,
+            max_workers=args.max_workers,
+            audio_preprocessor=args.audio_preprocessor,
+            error=exc,
+        )
+        raise

@@ -35,6 +35,127 @@ def _chunk_slack_lines(lines, limit=2800):
     return chunks
 
 
+def _post_slack_payload(payload):
+    token = os.environ.get("SLACK_BOT_TOKEN")
+    channel = os.environ.get("SLACK_CHANNEL_ID")
+    if not token or not channel:
+        return
+
+    payload = {**payload, "channel": channel}
+    request = urllib.request.Request(
+        _SLACK_CHAT_POST_MESSAGE_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            response_body = response.read().decode("utf-8")
+        slack_response = json.loads(response_body)
+        if not slack_response.get("ok"):
+            error = slack_response.get("error", "unknown_error")
+            print(f"WARNING: Slack notification failed: {error}")
+    except Exception as exc:
+        print(f"WARNING: Slack notification failed: {exc}")
+
+
+def _build_run_metadata_lines(
+    model_name,
+    dataset_path,
+    dataset_name,
+    split,
+    max_samples,
+    max_workers,
+    audio_preprocessor,
+):
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    sample_label = "full split" if max_samples is None else str(max_samples)
+    return [
+        f"*Model:* `{model_name}`",
+        f"*Dataset:* `{dataset_path}/{dataset_name}`",
+        f"*Split:* `{split}`",
+        f"*Samples:* `{sample_label}`",
+        f"*Workers:* `{max_workers}`",
+        f"*Audio preprocessor:* `{audio_preprocessor}`",
+        f"*Time:* {timestamp}",
+        f"*Host:* `{socket.gethostname()}`",
+    ]
+
+
+def post_slack_run_started(
+    model_name,
+    dataset_path,
+    dataset_name,
+    split,
+    max_samples,
+    max_workers,
+    audio_preprocessor="none",
+):
+    lines = _build_run_metadata_lines(
+        model_name,
+        dataset_path,
+        dataset_name,
+        split,
+        max_samples,
+        max_workers,
+        audio_preprocessor,
+    )
+    _post_slack_payload(
+        {
+            "text": f"ASR evaluation started: {model_name}",
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "*ASR evaluation started*\n" + "\n".join(lines),
+                    },
+                }
+            ],
+        }
+    )
+
+
+def post_slack_run_failed(
+    model_name,
+    dataset_path,
+    dataset_name,
+    split,
+    max_samples,
+    max_workers,
+    audio_preprocessor,
+    error,
+):
+    lines = _build_run_metadata_lines(
+        model_name,
+        dataset_path,
+        dataset_name,
+        split,
+        max_samples,
+        max_workers,
+        audio_preprocessor,
+    )
+    lines.append(f"*Error:* ```{str(error)[:2500]}```")
+    _post_slack_payload(
+        {
+            "text": f"ASR evaluation failed: {model_name}: {error}",
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "*ASR evaluation failed*\n" + "\n".join(lines),
+                    },
+                }
+            ],
+        }
+    )
+
+
 def _build_slack_eval_payload(
     channel,
     directory,
@@ -126,9 +247,8 @@ def _post_slack_eval_summary(
     multilingual,
     language,
 ):
-    token = os.environ.get("SLACK_BOT_TOKEN")
     channel = os.environ.get("SLACK_CHANNEL_ID")
-    if not token or not channel:
+    if not os.environ.get("SLACK_BOT_TOKEN") or not channel:
         return
 
     payload = _build_slack_eval_payload(
@@ -144,25 +264,47 @@ def _post_slack_eval_summary(
         multilingual,
         language,
     )
-    request = urllib.request.Request(
-        _SLACK_CHAT_POST_MESSAGE_URL,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json; charset=utf-8",
-        },
-        method="POST",
-    )
+    _post_slack_payload(payload)
 
-    try:
-        with urllib.request.urlopen(request, timeout=10) as response:
-            response_body = response.read().decode("utf-8")
-        slack_response = json.loads(response_body)
-        if not slack_response.get("ok"):
-            error = slack_response.get("error", "unknown_error")
-            print(f"WARNING: Slack notification failed: {error}")
-    except Exception as exc:
-        print(f"WARNING: Slack notification failed: {exc}")
+
+def post_slack_single_run_summary(
+    manifest_path,
+    model_name,
+    dataset_path,
+    dataset_name,
+    split,
+    wer_percent,
+    rtfx,
+    num_samples,
+    audio_preprocessor="none",
+):
+    result_key = f"{model_name} | {dataset_path}/{dataset_name}/{split}"
+    model_key = model_name
+    results = {
+        result_key: {
+            "wer": wer_percent,
+            "rtfx": rtfx,
+        }
+    }
+    composite_wer = {model_key: wer_percent}
+    composite_audio_length = {model_key: rtfx}
+    composite_inference_time = {model_key: 1 if rtfx is not None else None}
+    count_entries = {model_key: 1}
+
+    _post_slack_eval_summary(
+        directory=os.path.dirname(manifest_path) or ".",
+        result_files=[manifest_path],
+        original_model_id=(
+            f"{model_name} ({audio_preprocessor}, {num_samples} samples)"
+        ),
+        composite_wer=composite_wer,
+        composite_audio_length=composite_audio_length,
+        composite_inference_time=composite_inference_time,
+        count_entries=count_entries,
+        results=results,
+        multilingual=False,
+        language="en",
+    )
 
 
 def normalize_compound_pairs(refs, preds):
