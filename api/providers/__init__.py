@@ -58,5 +58,6 @@ from . import assemblyai_provider
 # from . import aquavoice_provider
 # from . import zoom_provider
 from . import smallest_provider
+from . import soniox_provider
 # from . import reson8_provider
 # from . import microsoft_azure_provider
