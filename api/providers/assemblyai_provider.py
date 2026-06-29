@@ -1,9 +1,59 @@
+import asyncio
+import json
 import os
 from typing import Optional
 
 import assemblyai as aai
 
 from . import APIProvider, PermanentError, register
+from .streaming_utils import build_query_url, compact_text, connect_websocket, pcm16_chunks
+
+
+ASSEMBLY_STREAMING_ENDPOINT = "wss://streaming.assemblyai.com/v3/ws"
+STREAMING_MODEL_MAP = {"universal-3-pro": "universal-3-5-pro"}
+TERMINATION_TIMEOUT_S = 30
+
+
+async def _transcribe_streaming(
+    audio_file_path: str,
+    api_key: str,
+    model: str,
+) -> str:
+    transcripts = []
+    url = build_query_url(
+        ASSEMBLY_STREAMING_ENDPOINT,
+        {"sample_rate": "16000", "speech_model": model},
+    )
+
+    async with connect_websocket(url, headers={"Authorization": api_key}) as ws:
+        async def receive_messages():
+            async for message in ws:
+                try:
+                    data = json.loads(message)
+                except json.JSONDecodeError:
+                    continue
+
+                if data.get("type") == "Termination":
+                    return
+                if data.get("type") != "Turn" or not data.get("end_of_turn"):
+                    continue
+
+                transcript = data.get("transcript", "")
+                if transcript:
+                    transcripts.append(transcript)
+
+        receiver = asyncio.create_task(receive_messages())
+        try:
+            for chunk in pcm16_chunks(audio_file_path):
+                await ws.send(chunk)
+            await ws.send(json.dumps({"type": "Terminate"}))
+            await asyncio.wait_for(receiver, timeout=TERMINATION_TIMEOUT_S)
+        finally:
+            if not receiver.done():
+                receiver.cancel()
+            await ws.close()
+
+    return compact_text(transcripts)
 
 
 @register("assembly")
@@ -51,3 +101,34 @@ class AssemblyAIProvider(APIProvider):
         if transcript.status == aai.TranscriptStatus.error:
             raise PermanentError(f"AssemblyAI transcription error: {transcript.error}")
         return transcript.text or ""
+
+    def transcribe_streaming(
+        self,
+        model_variant: str,
+        audio_file_path: Optional[str],
+        sample: dict,
+        use_url: bool = False,
+        language: str = "en",
+        prompt: Optional[str] = None,
+    ) -> str:
+        if use_url:
+            raise PermanentError(
+                "AssemblyAI streaming provider requires local audio; do not use --use_url"
+            )
+        if audio_file_path is None:
+            raise PermanentError(
+                "AssemblyAI streaming provider requires an audio file path"
+            )
+
+        api_key = os.getenv("ASSEMBLYAI_API_KEY")
+        if not api_key or api_key == "your_api_key":
+            raise ValueError("ASSEMBLYAI_API_KEY environment variable not set")
+
+        model = STREAMING_MODEL_MAP.get(model_variant, model_variant)
+        return asyncio.run(
+            _transcribe_streaming(
+                audio_file_path=audio_file_path,
+                api_key=api_key,
+                model=model,
+            )
+        ) or "."

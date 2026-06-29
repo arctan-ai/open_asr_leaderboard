@@ -63,6 +63,7 @@ def transcribe_with_retry(
     sample: dict,
     max_retries=10,
     use_url=False,
+    streaming=False,
     language="en",
     prompt=None,
 ):
@@ -73,7 +74,10 @@ def transcribe_with_retry(
     retries = 0
     while retries <= max_retries:
         try:
-            return provider.transcribe(variant, audio_file_path, sample, **kwargs)
+            transcribe_fn = (
+                provider.transcribe_streaming if streaming else provider.transcribe
+            )
+            return transcribe_fn(variant, audio_file_path, sample, **kwargs)
         except PermanentError:
             raise
         except Exception as e:
@@ -101,11 +105,15 @@ def transcribe_dataset(
     split,
     model_name,
     use_url=False,
+    streaming=False,
     max_samples=None,
     max_workers=4,
     prompt=None,
     args=None,
 ):
+    if streaming and use_url:
+        raise ValueError("--streaming requires local audio; do not use --use_url")
+
     if use_url:
         if getattr(args, "audio_preprocessor", "none") != "none":
             raise ValueError("--audio_preprocessor requires local audio; do not use --use_url")
@@ -126,7 +134,8 @@ def transcribe_dataset(
         "transcription_time_s": [],
     }
 
-    print(f"Transcribing with model: {model_name}")
+    mode = "streaming" if streaming else "static"
+    print(f"Transcribing with model: {model_name} ({mode})")
 
     def process_sample(sample):
         if use_url:
@@ -135,7 +144,12 @@ def transcribe_dataset(
             start = time.time()
             try:
                 transcription = transcribe_with_retry(
-                    model_name, None, sample, use_url=True, prompt=prompt
+                    model_name,
+                    None,
+                    sample,
+                    use_url=True,
+                    streaming=streaming,
+                    prompt=prompt,
                 )
             except Exception as e:
                 print(f"Failed to transcribe after retries: {e}")
@@ -158,7 +172,12 @@ def transcribe_dataset(
             start = time.time()
             try:
                 transcription = transcribe_with_retry(
-                    model_name, tmp_path, sample, use_url=False, prompt=prompt
+                    model_name,
+                    tmp_path,
+                    sample,
+                    use_url=False,
+                    streaming=streaming,
+                    prompt=prompt,
                 )
             except Exception as e:
                 print(f"Failed to transcribe after retries: {e}")
@@ -221,6 +240,7 @@ def transcribe_dataset(
         rtfx=rtfx,
         num_samples=len(results["references"]),
         audio_preprocessor=getattr(args, "audio_preprocessor", "none"),
+        streaming=streaming,
     )
 
 
@@ -246,6 +266,11 @@ if __name__ == "__main__":
         help="Use URL-based audio fetching instead of datasets",
     )
     parser.add_argument(
+        "--streaming",
+        action="store_true",
+        help="Use the provider streaming ASR endpoint; requires local audio",
+    )
+    parser.add_argument(
         "--prompt",
         type=str,
         default=None,
@@ -254,6 +279,8 @@ if __name__ == "__main__":
     data_utils.add_audio_preprocessor_args(parser)
 
     args = parser.parse_args()
+    if args.streaming and args.use_url:
+        parser.error("--streaming requires local audio; do not use --use_url")
     if args.use_url and args.audio_preprocessor != "none":
         parser.error("--audio_preprocessor requires local audio; do not use --use_url")
 
@@ -265,6 +292,7 @@ if __name__ == "__main__":
         max_samples=args.max_samples,
         max_workers=args.max_workers,
         audio_preprocessor=args.audio_preprocessor,
+        streaming=args.streaming,
     )
     try:
         transcribe_dataset(
@@ -273,6 +301,7 @@ if __name__ == "__main__":
             split=args.split,
             model_name=args.model_name,
             use_url=args.use_url,
+            streaming=args.streaming,
             max_samples=args.max_samples,
             max_workers=args.max_workers,
             prompt=args.prompt,
@@ -288,5 +317,6 @@ if __name__ == "__main__":
             max_workers=args.max_workers,
             audio_preprocessor=args.audio_preprocessor,
             error=exc,
+            streaming=args.streaming,
         )
         raise

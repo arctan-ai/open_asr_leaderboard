@@ -63,6 +63,7 @@ def transcribe_with_retry(
     sample: dict,
     max_retries=10,
     use_url=False,
+    streaming=False,
     language="en",
     prompt=None,
 ):
@@ -73,7 +74,10 @@ def transcribe_with_retry(
     retries = 0
     while retries <= max_retries:
         try:
-            return provider.transcribe(variant, audio_file_path, sample, **kwargs)
+            transcribe_fn = (
+                provider.transcribe_streaming if streaming else provider.transcribe
+            )
+            return transcribe_fn(variant, audio_file_path, sample, **kwargs)
         except PermanentError:
             raise
         except Exception as e:
@@ -102,10 +106,14 @@ def transcribe_dataset(
     model_name,
     language,
     use_url=False,
+    streaming=False,
     max_samples=None,
     max_workers=4,
     prompt=None,
 ):
+    if streaming and use_url:
+        raise ValueError("--streaming requires local audio; do not use --use_url")
+
     if use_url:
         audio_rows = fetch_audio_urls(dataset_path, config_name, split)
         if max_samples:
@@ -127,7 +135,8 @@ def transcribe_dataset(
     }
 
     print(
-        f"Transcribing with model: {model_name}, language: {language}, config: {config_name}"
+        f"Transcribing with model: {model_name}, language: {language}, "
+        f"config: {config_name}, mode: {'streaming' if streaming else 'static'}"
     )
 
     def process_sample(sample):
@@ -141,6 +150,7 @@ def transcribe_dataset(
                     None,
                     sample,
                     use_url=True,
+                    streaming=streaming,
                     language=language,
                     prompt=prompt,
                 )
@@ -169,6 +179,7 @@ def transcribe_dataset(
                     tmp_path,
                     sample,
                     use_url=False,
+                    streaming=streaming,
                     language=language,
                     prompt=prompt,
                 )
@@ -278,6 +289,11 @@ if __name__ == "__main__":
         help="Use URL-based audio fetching instead of datasets",
     )
     parser.add_argument(
+        "--streaming",
+        action="store_true",
+        help="Use the provider streaming ASR endpoint; requires local audio",
+    )
+    parser.add_argument(
         "--prompt",
         type=str,
         default=None,
@@ -285,6 +301,8 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+    if args.streaming and args.use_url:
+        parser.error("--streaming requires local audio; do not use --use_url")
 
     transcribe_dataset(
         dataset_path=args.dataset_path,
@@ -293,6 +311,7 @@ if __name__ == "__main__":
         model_name=args.model_name,
         language=args.language,
         use_url=args.use_url,
+        streaming=args.streaming,
         max_samples=args.max_samples,
         max_workers=args.max_workers,
         prompt=args.prompt,

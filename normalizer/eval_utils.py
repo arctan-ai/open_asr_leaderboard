@@ -71,10 +71,11 @@ def _build_run_metadata_lines(
     max_samples,
     max_workers,
     audio_preprocessor,
+    streaming=False,
 ):
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     sample_label = "full split" if max_samples is None else str(max_samples)
-    return [
+    lines = [
         f"*Model:* `{model_name}`",
         f"*Dataset:* `{dataset_path}/{dataset_name}`",
         f"*Split:* `{split}`",
@@ -84,6 +85,9 @@ def _build_run_metadata_lines(
         f"*Time:* {timestamp}",
         f"*Host:* `{socket.gethostname()}`",
     ]
+    if streaming:
+        lines.insert(1, "*Mode:* `streaming`")
+    return lines
 
 
 def post_slack_run_started(
@@ -94,6 +98,7 @@ def post_slack_run_started(
     max_samples,
     max_workers,
     audio_preprocessor="none",
+    streaming=False,
 ):
     lines = _build_run_metadata_lines(
         model_name,
@@ -103,6 +108,7 @@ def post_slack_run_started(
         max_samples,
         max_workers,
         audio_preprocessor,
+        streaming=streaming,
     )
     _post_slack_payload(
         {
@@ -129,6 +135,7 @@ def post_slack_run_failed(
     max_workers,
     audio_preprocessor,
     error,
+    streaming=False,
 ):
     lines = _build_run_metadata_lines(
         model_name,
@@ -138,6 +145,7 @@ def post_slack_run_failed(
         max_samples,
         max_workers,
         audio_preprocessor,
+        streaming=streaming,
     )
     lines.append(f"*Error:* ```{str(error)[:2500]}```")
     _post_slack_payload(
@@ -277,6 +285,7 @@ def post_slack_single_run_summary(
     rtfx,
     num_samples,
     audio_preprocessor="none",
+    streaming=False,
 ):
     result_key = f"{model_name} | {dataset_path}/{dataset_name}/{split}"
     model_key = model_name
@@ -290,13 +299,15 @@ def post_slack_single_run_summary(
     composite_audio_length = {model_key: rtfx}
     composite_inference_time = {model_key: 1 if rtfx is not None else None}
     count_entries = {model_key: 1}
+    label_parts = [audio_preprocessor]
+    if streaming:
+        label_parts.append("streaming")
+    label_parts.append(f"{num_samples} samples")
 
     _post_slack_eval_summary(
         directory=os.path.dirname(manifest_path) or ".",
         result_files=[manifest_path],
-        original_model_id=(
-            f"{model_name} ({audio_preprocessor}, {num_samples} samples)"
-        ),
+        original_model_id=f"{model_name} ({', '.join(label_parts)})",
         composite_wer=composite_wer,
         composite_audio_length=composite_audio_length,
         composite_inference_time=composite_inference_time,

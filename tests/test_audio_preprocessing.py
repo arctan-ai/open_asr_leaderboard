@@ -37,6 +37,9 @@ def load_data_utils():
     eval_utils_stub.read_manifest = lambda *args, **kwargs: None
     eval_utils_stub.write_manifest = lambda *args, **kwargs: None
     eval_utils_stub.normalize_compound_pairs = lambda *args, **kwargs: None
+    eval_utils_stub.post_slack_single_run_summary = lambda *args, **kwargs: None
+    eval_utils_stub.post_slack_run_started = lambda *args, **kwargs: None
+    eval_utils_stub.post_slack_run_failed = lambda *args, **kwargs: None
 
     with mock.patch.dict(
         sys.modules,

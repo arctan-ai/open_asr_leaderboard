@@ -1,3 +1,5 @@
+import asyncio
+import json
 import os
 import time
 from typing import Optional
@@ -5,10 +7,13 @@ from typing import Optional
 import requests
 
 from . import APIProvider, PermanentError, register
+from .streaming_utils import compact_text, connect_websocket, pcm16_chunks
 
 
 SONIOX_API_BASE_URL = "https://api.soniox.com"
+SONIOX_STREAMING_ENDPOINT = "wss://stt-rt.soniox.com/transcribe-websocket"
 DEFAULT_MODEL = "stt-async-v5"
+STREAMING_MODEL_MAP = {"stt-async-v5": "stt-rt-v5"}
 POLL_INTERVAL_S = 1
 POLL_TIMEOUT_S = 600
 
@@ -92,6 +97,51 @@ def _get_transcript(session: requests.Session, transcription_id: str) -> str:
     return _render_tokens(response.json().get("tokens", []))
 
 
+async def _transcribe_streaming(
+    audio_file_path: str,
+    api_key: str,
+    model: str,
+    language: str,
+) -> str:
+    config = {
+        "api_key": api_key,
+        "model": model,
+        "audio_format": "pcm_s16le",
+        "sample_rate": 16000,
+        "num_channels": 1,
+        "language_hints": [language],
+    }
+    final_text_parts = []
+
+    async with connect_websocket(SONIOX_STREAMING_ENDPOINT) as ws:
+        await ws.send(json.dumps(config))
+        for chunk in pcm16_chunks(audio_file_path):
+            await ws.send(chunk)
+        await ws.send("")
+
+        async for message in ws:
+            try:
+                data = json.loads(message)
+            except json.JSONDecodeError:
+                continue
+
+            if data.get("error_code") is not None:
+                raise PermanentError(
+                    f"Soniox streaming error {data.get('error_code')}: "
+                    f"{data.get('error_message', 'unknown')}"
+                )
+
+            for token in data.get("tokens", []):
+                text = str(token.get("text", ""))
+                if token.get("is_final") and text and text != "<end>":
+                    final_text_parts.append(text)
+
+            if data.get("finished"):
+                break
+
+    return compact_text(final_text_parts)
+
+
 def _delete_transcription(session: requests.Session, transcription_id: str) -> None:
     response = session.delete(
         f"{SONIOX_API_BASE_URL}/v1/transcriptions/{transcription_id}",
@@ -157,3 +207,33 @@ class SonioxProvider(APIProvider):
                     _delete_file(session, file_id)
                 except Exception as exc:
                     print(f"Warning: failed to delete Soniox file: {exc}")
+
+    def transcribe_streaming(
+        self,
+        model_variant: str,
+        audio_file_path: Optional[str],
+        sample: dict,
+        use_url: bool = False,
+        language: str = "en",
+        prompt: Optional[str] = None,
+    ) -> str:
+        if use_url:
+            raise PermanentError(
+                "Soniox streaming provider requires local audio; do not use --use_url"
+            )
+        if audio_file_path is None:
+            raise PermanentError("Soniox streaming provider requires an audio file path")
+
+        api_key = os.getenv("SONIOX_API_KEY")
+        if not api_key or api_key == "your_api_key":
+            raise ValueError("SONIOX_API_KEY environment variable not set")
+
+        model = STREAMING_MODEL_MAP.get(model_variant or DEFAULT_MODEL, model_variant)
+        return asyncio.run(
+            _transcribe_streaming(
+                audio_file_path=audio_file_path,
+                api_key=api_key,
+                model=model,
+                language=language,
+            )
+        ) or "."
