@@ -5,7 +5,14 @@ import num2words
 from datasets import load_dataset, Audio, IterableDataset
 from normalizer import EnglishTextNormalizer, BasicMultilingualTextNormalizer
 
-from .eval_utils import read_manifest, write_manifest, normalize_compound_pairs
+from .eval_utils import (
+    read_manifest,
+    write_manifest,
+    normalize_compound_pairs,
+    post_slack_single_run_summary,
+    post_slack_run_started,
+    post_slack_run_failed,
+)
 
 
 def is_target_text_in_range(ref):
@@ -86,6 +93,12 @@ def add_audio_preprocessor_args(parser):
         type=int,
         default=10,
         help="Chunk size in milliseconds for --audio_preprocessor arctan.",
+    )
+    parser.add_argument(
+        "--audio_preprocessor_batch_size",
+        type=int,
+        default=1,
+        help="Batch size for eval-time audio preprocessing.",
     )
 
 
@@ -204,6 +217,10 @@ def load_data(args):
 def prepare_data(dataset, sampling_rate=16000, args=None):
     audio_preprocessor = _get_arg(args, "audio_preprocessor", "none")
     arctan_chunk_ms = _get_arg(args, "arctan_chunk_ms", 10)
+    audio_preprocessor_batch_size = _get_arg(args, "audio_preprocessor_batch_size", 1)
+
+    if audio_preprocessor_batch_size <= 0:
+        raise ValueError("--audio_preprocessor_batch_size must be greater than 0")
 
     # Re-sample and normalize transcriptions
     dataset = dataset.cast_column("audio", Audio(sampling_rate=sampling_rate))
@@ -216,7 +233,12 @@ def prepare_data(dataset, sampling_rate=16000, args=None):
         audio_preprocessor, arctan_chunk_ms
     )
     if audio_preprocess_fn is not None:
-        dataset = dataset.map(audio_preprocess_fn, batched=True, **map_kwargs)
+        dataset = dataset.map(
+            audio_preprocess_fn,
+            batched=True,
+            batch_size=audio_preprocessor_batch_size,
+            **map_kwargs,
+        )
     dataset = dataset.map(normalize, **map_kwargs)
     dataset = dataset.filter(is_target_text_in_range, input_columns=["norm_text"])
 
