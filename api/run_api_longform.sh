@@ -11,6 +11,7 @@ export AQUAVOICE_API_KEY="your_api_key"
 export SPEECHMATICS_API_KEY="your_api_key"
 export RESON8_API_KEY="your_api_key"
 export SONIOX_API_KEY="your_api_key"
+export DEEPGRAM_API_KEY="your_api_key"
 
 MODEL_IDs=(
     "openai/gpt-4o-transcribe"
@@ -22,6 +23,7 @@ MODEL_IDs=(
     "revai/fusion" # please use --use_url=True
     "speechmatics/enhanced"
     # "soniox/stt-async-v5"
+    # "deepgram/nova-3"
     "aquavoice/avalon-v1-en"
     "reson8/resonant-1"
     "reson8/resonant-1-flash"
