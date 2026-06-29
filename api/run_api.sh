@@ -21,6 +21,10 @@ RESULTS_BUCKET="${RESULTS_BUCKET:-}"
 # ── Models: "model_id use_url max_workers" ───────────────────────────────────
 # use_url=true  → provider receives a remote audio URL (revai, zoom)
 # use_url=false → provider receives a local audio file (all others)
+# Streaming examples, run directly when needed:
+# python run_eval.py --dataset_path="$DATASET_PATH" --dataset=ami --split=test --model_name deepgram/nova-3 --max_workers=16 --streaming
+# python run_eval.py --dataset_path="$DATASET_PATH" --dataset=ami --split=test --model_name soniox/stt-async-v5 --max_workers=16 --streaming
+# python run_eval.py --dataset_path="$DATASET_PATH" --dataset=ami --split=test --model_name assembly/universal-3-pro --max_workers=4 --streaming
 MODEL_CONFIGS=(
     # "openai/gpt-4o-transcribe      false  16"
     # "openai/gpt-4o-mini-transcribe false  16"

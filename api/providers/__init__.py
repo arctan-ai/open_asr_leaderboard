@@ -22,6 +22,20 @@ class APIProvider(ABC):
         """Transcribe audio and return the text."""
         ...
 
+    def transcribe_streaming(
+        self,
+        model_variant: str,
+        audio_file_path: Optional[str],
+        sample: dict,
+        use_url: bool = False,
+        language: str = "en",
+        prompt: Optional[str] = None,
+    ) -> str:
+        """Transcribe audio through a streaming ASR endpoint and return the text."""
+        raise PermanentError(
+            f"Streaming ASR is not supported for {self.__class__.__name__}"
+        )
+
 
 _REGISTRY: dict[str, type[APIProvider]] = {}
 

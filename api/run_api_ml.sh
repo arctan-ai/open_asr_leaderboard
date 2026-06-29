@@ -17,6 +17,10 @@ export SONIOX_API_KEY="your_api_key"
 export DEEPGRAM_API_KEY="your_api_key"
 
 # Configuration
+# Streaming examples, run directly when needed:
+# python run_eval_ml.py --dataset_path="$DATASET_PATH" --config_name=fleurs_de --language=de --split=test --model_name deepgram/nova-3 --max_workers=16 --streaming
+# python run_eval_ml.py --dataset_path="$DATASET_PATH" --config_name=fleurs_de --language=de --split=test --model_name soniox/stt-async-v5 --max_workers=16 --streaming
+# python run_eval_ml.py --dataset_path="$DATASET_PATH" --config_name=fleurs_de --language=de --split=test --model_name assembly/universal-3-pro --max_workers=4 --streaming
 MODEL_IDs=(
     # "openai/gpt-4o-transcribe"
     # "openai/gpt-4o-mini-transcribe"
