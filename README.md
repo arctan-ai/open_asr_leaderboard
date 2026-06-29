@@ -96,7 +96,12 @@ python transformers/run_eval.py \
     --audio_preprocessor=arctan
 ```
 
-`--audio_preprocessor=arctan` requires the optional `arctan-vi` package and a valid `ARCTAN_SDK_KEY` in the eval environment or `.env` file. The `.env` file is loaded with `python-dotenv` when Arctan preprocessing is enabled. The default is `--audio_preprocessor=none`, which preserves the existing evaluation path. API URL mode, multilingual scripts, Nemo scripts, and long-form scripts are not wired for this MVP path. Reported RTFx still measures ASR inference time only; preprocessing runs before the timed transcription section.
+Available preprocessors:
+
+- `arctan`: requires the optional `arctan-vi` package and a valid `ARCTAN_SDK_KEY` in the eval environment or `.env` file.
+- `ai_coustics_vfl_2_1`: runs the ai-coustics VFL 2.1 path through the `livekit-examples/noise-canceller` CLI used by [`ai-coustics/lk-noise-canceller-examples`](https://github.com/ai-coustics/lk-noise-canceller-examples). Clone that repo with submodules, set `AI_COUSTICS_NOISE_CANCELLER_DIR` to its `noise-canceller` directory, and set `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET`. The leaderboard wrapper uses filter `aic-quail-vfl`, enhancement level `1.0`, 16 kHz output, a 2-second leading-silence pad, and the CLI's ai-coustics `--direct` mode.
+
+The `.env` file is loaded with `python-dotenv` when audio preprocessing is enabled. The default is `--audio_preprocessor=none`, which preserves the existing evaluation path. API URL mode, multilingual scripts, Nemo scripts, and long-form scripts are not wired for this MVP path. Reported RTFx still measures ASR inference time only; preprocessing runs before the timed transcription section.
 
 # Trade-off plots
 
