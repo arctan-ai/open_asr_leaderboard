@@ -314,5 +314,36 @@ class StreamingProviderTest(unittest.TestCase):
         self.assertTrue(fake_ws.closed)
 
 
+    def test_cartesia_collects_turn_end_transcripts(self):
+        load_providers()
+        from providers import cartesia_provider
+
+        messages = [
+            json.dumps({"type": "connected", "request_id": "abc"}),
+            json.dumps({"type": "turn.start"}),
+            json.dumps({"type": "turn.update", "transcript": "hello"}),
+            json.dumps({"type": "turn.end", "transcript": "hello world"}),
+            json.dumps({"type": "turn.start"}),
+            json.dumps({"type": "turn.update", "transcript": "foo"}),
+            json.dumps({"type": "turn.end", "transcript": "foo bar"}),
+        ]
+        fake_ws = FakeWebSocket(messages)
+
+        with mock.patch.object(cartesia_provider, "pcm16_chunks", return_value=[b"a"]):
+            with mock.patch.object(
+                cartesia_provider, "connect_websocket", return_value=fake_ws
+            ):
+                transcript = asyncio.run(
+                    cartesia_provider._transcribe_streaming(
+                        "/tmp/audio.wav",
+                        "key",
+                        "ink-2",
+                    )
+                )
+
+        self.assertEqual(transcript, "hello world foo bar")
+        self.assertIn(json.dumps({"type": "close"}), fake_ws.sent)
+
+
 if __name__ == "__main__":
     unittest.main()
