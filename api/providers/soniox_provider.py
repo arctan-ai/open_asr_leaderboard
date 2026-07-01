@@ -7,7 +7,7 @@ from typing import Optional
 import requests
 
 from . import APIProvider, PermanentError, register
-from .streaming_utils import compact_text, connect_websocket, pcm16_chunks
+from .streaming_utils import connect_websocket, pcm16_chunks
 
 SONIOX_API_BASE_URL = "https://api.soniox.com"
 SONIOX_STREAMING_ENDPOINT = "wss://stt-rt.soniox.com/transcribe-websocket"
@@ -95,7 +95,7 @@ def _get_transcript(session: requests.Session, transcription_id: str) -> str:
         timeout=60,
     )
     _raise_for_permanent_client_error(response)
-    return _render_tokens(response.json().get("tokens", []))
+    return response.json().get("text", "")
 
 
 async def _transcribe_streaming(
@@ -150,7 +150,7 @@ async def _transcribe_streaming(
                 receiver.cancel()
             await ws.close()
 
-    return compact_text(final_text_parts)
+    return " ".join("".join(final_text_parts).split())
 
 
 def _delete_transcription(session: requests.Session, transcription_id: str) -> None:
