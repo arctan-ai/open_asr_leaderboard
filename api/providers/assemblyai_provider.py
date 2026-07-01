@@ -6,7 +6,12 @@ from typing import Optional
 import assemblyai as aai
 
 from . import APIProvider, PermanentError, register
-from .streaming_utils import build_query_url, compact_text, connect_websocket, pcm16_chunks
+from .streaming_utils import (
+    build_query_url,
+    compact_text,
+    connect_websocket,
+    pcm16_chunks,
+)
 
 
 ASSEMBLY_STREAMING_ENDPOINT = "wss://streaming.assemblyai.com/v3/ws"
@@ -27,6 +32,7 @@ async def _transcribe_streaming(
     )
 
     async with connect_websocket(url, headers={"Authorization": api_key}) as ws:
+
         async def receive_messages():
             async for message in ws:
                 try:
@@ -133,10 +139,13 @@ class AssemblyAIProvider(APIProvider):
             raise ValueError("ASSEMBLYAI_API_KEY environment variable not set")
 
         model = STREAMING_MODEL_MAP.get(model_variant, model_variant)
-        return asyncio.run(
-            _transcribe_streaming(
-                audio_file_path=audio_file_path,
-                api_key=api_key,
-                model=model,
+        return (
+            asyncio.run(
+                _transcribe_streaming(
+                    audio_file_path=audio_file_path,
+                    api_key=api_key,
+                    model=model,
+                )
             )
-        ) or "."
+            or "."
+        )

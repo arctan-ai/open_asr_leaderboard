@@ -9,7 +9,6 @@ import requests
 from . import APIProvider, PermanentError, register
 from .streaming_utils import compact_text, connect_websocket, pcm16_chunks
 
-
 SONIOX_API_BASE_URL = "https://api.soniox.com"
 SONIOX_STREAMING_ENDPOINT = "wss://stt-rt.soniox.com/transcribe-websocket"
 DEFAULT_MODEL = "stt-async-v5"
@@ -234,18 +233,23 @@ class SonioxProvider(APIProvider):
                 "Soniox streaming provider requires local audio; do not use --use_url"
             )
         if audio_file_path is None:
-            raise PermanentError("Soniox streaming provider requires an audio file path")
+            raise PermanentError(
+                "Soniox streaming provider requires an audio file path"
+            )
 
         api_key = os.getenv("SONIOX_API_KEY")
         if not api_key or api_key == "your_api_key":
             raise ValueError("SONIOX_API_KEY environment variable not set")
 
         model = STREAMING_MODEL_MAP.get(model_variant or DEFAULT_MODEL, model_variant)
-        return asyncio.run(
-            _transcribe_streaming(
-                audio_file_path=audio_file_path,
-                api_key=api_key,
-                model=model,
-                language=language,
+        return (
+            asyncio.run(
+                _transcribe_streaming(
+                    audio_file_path=audio_file_path,
+                    api_key=api_key,
+                    model=model,
+                    language=language,
+                )
             )
-        ) or "."
+            or "."
+        )

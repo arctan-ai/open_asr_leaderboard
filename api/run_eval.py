@@ -116,7 +116,9 @@ def transcribe_dataset(
 
     if use_url:
         if getattr(args, "audio_preprocessor", "none") != "none":
-            raise ValueError("--audio_preprocessor requires local audio; do not use --use_url")
+            raise ValueError(
+                "--audio_preprocessor requires local audio; do not use --use_url"
+            )
         audio_rows = fetch_audio_urls(dataset_path, dataset, split)
         if max_samples:
             audio_rows = itertools.islice(audio_rows, max_samples)

@@ -153,7 +153,9 @@ class SlackNotificationTest(unittest.TestCase):
                         language="en",
                     )
 
-        self.assertIn("WARNING: Slack notification failed: channel_not_found", stdout.getvalue())
+        self.assertIn(
+            "WARNING: Slack notification failed: channel_not_found", stdout.getvalue()
+        )
 
     def test_network_error_warns_without_raising(self):
         metrics = sample_metrics()
@@ -178,7 +180,9 @@ class SlackNotificationTest(unittest.TestCase):
                         language="en",
                     )
 
-        self.assertIn("WARNING: Slack notification failed: network unavailable", stdout.getvalue())
+        self.assertIn(
+            "WARNING: Slack notification failed: network unavailable", stdout.getvalue()
+        )
 
 
 if __name__ == "__main__":

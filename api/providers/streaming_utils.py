@@ -16,7 +16,9 @@ def pcm16_chunks(
     import numpy as np
     import soundfile as sf
 
-    audio, actual_sample_rate = sf.read(audio_file_path, always_2d=True, dtype="float32")
+    audio, actual_sample_rate = sf.read(
+        audio_file_path, always_2d=True, dtype="float32"
+    )
     if actual_sample_rate != sample_rate:
         raise PermanentError(
             f"Streaming ASR requires {sample_rate} Hz audio; got {actual_sample_rate} Hz"

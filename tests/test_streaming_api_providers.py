@@ -91,7 +91,9 @@ def load_run_eval(module_name):
     eval_utils_stub.normalize_compound_pairs = lambda refs, preds: (refs, preds)
 
     module_path = API_DIR / f"{module_name}.py"
-    spec = importlib.util.spec_from_file_location(f"{module_name}_under_test", module_path)
+    spec = importlib.util.spec_from_file_location(
+        f"{module_name}_under_test", module_path
+    )
     module = importlib.util.module_from_spec(spec)
 
     with mock.patch.dict(
@@ -128,7 +130,9 @@ class StreamingProviderTest(unittest.TestCase):
                 return "streamed"
 
         provider = FakeProvider()
-        with mock.patch.object(run_eval, "get_provider", return_value=(provider, "nova-3")):
+        with mock.patch.object(
+            run_eval, "get_provider", return_value=(provider, "nova-3")
+        ):
             transcript = run_eval.transcribe_with_retry(
                 "deepgram/nova-3",
                 "/tmp/audio.wav",
@@ -291,7 +295,9 @@ class StreamingProviderTest(unittest.TestCase):
         ]
         fake_ws = FakeWebSocket(messages)
 
-        with mock.patch.object(assemblyai_provider, "pcm16_chunks", return_value=[b"a"]):
+        with mock.patch.object(
+            assemblyai_provider, "pcm16_chunks", return_value=[b"a"]
+        ):
             with mock.patch.object(
                 assemblyai_provider, "connect_websocket", return_value=fake_ws
             ):

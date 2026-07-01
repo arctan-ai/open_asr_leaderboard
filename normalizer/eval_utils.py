@@ -182,7 +182,9 @@ def _build_slack_eval_payload(
     for model_key, total_wer in composite_wer.items():
         avg_wer = total_wer / count_entries[model_key]
         if composite_audio_length[model_key] is not None:
-            rtfx = composite_audio_length[model_key] / composite_inference_time[model_key]
+            rtfx = (
+                composite_audio_length[model_key] / composite_inference_time[model_key]
+            )
         else:
             rtfx = None
         model_label = original_model_id if original_model_id is not None else model_key

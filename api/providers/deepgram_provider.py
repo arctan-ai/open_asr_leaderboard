@@ -6,7 +6,12 @@ from typing import Optional
 import requests
 
 from . import APIProvider, PermanentError, register
-from .streaming_utils import build_query_url, compact_text, connect_websocket, pcm16_chunks
+from .streaming_utils import (
+    build_query_url,
+    compact_text,
+    connect_websocket,
+    pcm16_chunks,
+)
 
 
 DEEPGRAM_ENDPOINT = "https://api.deepgram.com/v1/listen"
@@ -132,7 +137,9 @@ class DeepgramProvider(APIProvider):
                 "Deepgram streaming provider requires local audio; do not use --use_url"
             )
         if audio_file_path is None:
-            raise PermanentError("Deepgram streaming provider requires an audio file path")
+            raise PermanentError(
+                "Deepgram streaming provider requires an audio file path"
+            )
 
         api_key = os.getenv("DEEPGRAM_API_KEY")
         if not api_key or api_key == "your_api_key":
@@ -141,11 +148,14 @@ class DeepgramProvider(APIProvider):
             )
 
         model = model_variant or DEFAULT_MODEL
-        return asyncio.run(
-            _transcribe_streaming(
-                audio_file_path=audio_file_path,
-                api_key=api_key,
-                model=model,
-                language=language,
+        return (
+            asyncio.run(
+                _transcribe_streaming(
+                    audio_file_path=audio_file_path,
+                    api_key=api_key,
+                    model=model,
+                    language=language,
+                )
             )
-        ) or "."
+            or "."
+        )
