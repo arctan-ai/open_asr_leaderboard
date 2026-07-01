@@ -294,5 +294,88 @@ class AudioPreprocessingTest(unittest.TestCase):
         self.assertIn("--ai-coustics-enhancement-level", command)
 
 
+    def test_krisp_bvc_loader_requires_livekit_credentials(self):
+        dotenv_stub = types.ModuleType("dotenv")
+        dotenv_stub.load_dotenv = mock.Mock()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = Path(tmpdir)
+            (project / "noise-canceller.py").write_text("")
+
+            with mock.patch.dict(sys.modules, {"dotenv": dotenv_stub}):
+                with mock.patch.dict("os.environ", {}, clear=True):
+                    with mock.patch("shutil.which", return_value="/usr/bin/uv"):
+                        with self.assertRaisesRegex(RuntimeError, "LIVEKIT_URL"):
+                            data_utils._load_krisp_bvc_config(project, 16000, 2.0)
+
+    def test_krisp_bvc_loader_reads_env_project_dir(self):
+        dotenv_stub = types.ModuleType("dotenv")
+        dotenv_stub.load_dotenv = mock.Mock()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = Path(tmpdir)
+            (project / "noise-canceller.py").write_text("")
+
+            env = {
+                "AI_COUSTICS_NOISE_CANCELLER_DIR": str(project),
+                "LIVEKIT_URL": "wss://example.livekit.cloud",
+                "LIVEKIT_API_KEY": "key",
+                "LIVEKIT_API_SECRET": "secret",
+            }
+            with mock.patch.dict(sys.modules, {"dotenv": dotenv_stub}):
+                with mock.patch.dict("os.environ", env, clear=True):
+                    with mock.patch("shutil.which", return_value="/usr/bin/uv"):
+                        config = data_utils._load_krisp_bvc_config(None, 16000, 2.0)
+
+        self.assertEqual(config["project_dir"], project)
+        self.assertEqual(config["script"], project / "noise-canceller.py")
+        self.assertEqual(config["sample_rate"], 16000)
+        self.assertNotIn("enhancement_level", config)
+        dotenv_stub.load_dotenv.assert_called_once_with()
+
+    def test_krisp_bvc_processing_runs_cli_and_trims_padding(self):
+        sf_stub = types.ModuleType("soundfile")
+        sf_stub.write = mock.Mock()
+        sf_stub.read = mock.Mock(
+            return_value=(np.array([0.0, 0.0, 1.0, 2.0, 3.0], dtype=np.float32), 10)
+        )
+        run_result = types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = Path(tmpdir)
+            script = project / "noise-canceller.py"
+            script.write_text("")
+            config = {
+                "project_dir": project,
+                "script": script,
+                "sample_rate": 10,
+                "pad_seconds": 0.2,
+            }
+            audio = {
+                "array": np.array([1.0, 2.0, 3.0], dtype=np.float32),
+                "sampling_rate": 10,
+            }
+
+            with mock.patch.dict(sys.modules, {"soundfile": sf_stub}):
+                with mock.patch(
+                    "subprocess.run", return_value=run_result
+                ) as run_mock:
+                    processed = data_utils._process_audio_with_krisp_bvc(
+                        audio, config
+                    )
+
+        self.assertEqual(processed["sampling_rate"], 10)
+        np.testing.assert_allclose(
+            processed["array"],
+            np.array([1.0, 2.0, 3.0], dtype=np.float32),
+        )
+        command = run_mock.call_args.args[0]
+        self.assertIn("--filter", command)
+        self.assertIn("BVC", command)
+        self.assertIn("--silent", command)
+        self.assertNotIn("--ai-coustics-enhancement-level", command)
+        self.assertNotIn("--direct", command)
+
+
 if __name__ == "__main__":
     unittest.main()
