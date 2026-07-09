@@ -143,6 +143,93 @@ class StreamingProviderTest(unittest.TestCase):
         self.assertEqual(transcript, "streamed")
         self.assertTrue(provider.streaming_called)
 
+    def test_soniox_realtime_model_forces_streaming(self):
+        run_eval = load_run_eval("run_eval")
+
+        class FakeProvider:
+            def __init__(self):
+                self.streaming_called = False
+
+            def force_streaming_for_model(self, model_variant):
+                return model_variant == "stt-rt-v5"
+
+            def transcribe(self, *args, **kwargs):
+                raise AssertionError("static transcribe should not be called")
+
+            def transcribe_streaming(self, *args, **kwargs):
+                self.streaming_called = True
+                return "streamed"
+
+        provider = FakeProvider()
+        with mock.patch.object(
+            run_eval, "get_provider", return_value=(provider, "stt-rt-v5")
+        ):
+            transcript = run_eval.transcribe_with_retry(
+                "soniox/stt-rt-v5",
+                "/tmp/audio.wav",
+                {"audio": {"array": [], "sampling_rate": 16000}},
+                streaming=False,
+            )
+
+        self.assertEqual(transcript, "streamed")
+        self.assertTrue(provider.streaming_called)
+
+    def test_soniox_async_model_keeps_static_mode(self):
+        run_eval = load_run_eval("run_eval")
+
+        class FakeProvider:
+            def __init__(self):
+                self.static_called = False
+
+            def force_streaming_for_model(self, model_variant):
+                return model_variant == "stt-rt-v5"
+
+            def transcribe(self, *args, **kwargs):
+                self.static_called = True
+                return "static"
+
+            def transcribe_streaming(self, *args, **kwargs):
+                raise AssertionError("streaming transcribe should not be called")
+
+        provider = FakeProvider()
+        with mock.patch.object(
+            run_eval, "get_provider", return_value=(provider, "stt-async-v5")
+        ):
+            transcript = run_eval.transcribe_with_retry(
+                "soniox/stt-async-v5",
+                "/tmp/audio.wav",
+                {"audio": {"array": [], "sampling_rate": 16000}},
+                streaming=False,
+            )
+
+        self.assertEqual(transcript, "static")
+        self.assertTrue(provider.static_called)
+
+    def test_forced_streaming_rejects_url_audio(self):
+        run_eval = load_run_eval("run_eval")
+
+        class FakeProvider:
+            def force_streaming_for_model(self, model_variant):
+                return model_variant == "stt-rt-v5"
+
+            def transcribe(self, *args, **kwargs):
+                raise AssertionError("static transcribe should not be called")
+
+            def transcribe_streaming(self, *args, **kwargs):
+                raise AssertionError("streaming transcribe should not be called")
+
+        with mock.patch.object(
+            run_eval, "get_provider", return_value=(FakeProvider(), "stt-rt-v5")
+        ):
+            with self.assertRaisesRegex(ValueError, "--streaming requires local audio"):
+                run_eval.transcribe_with_retry(
+                    "soniox/stt-rt-v5",
+                    None,
+                    {"row": {"audio": [{"src": "https://example.com/audio.wav"}]}},
+                    use_url=True,
+                    streaming=False,
+                )
+
     def test_unsupported_provider_streaming_fails_clearly(self):
         providers = load_providers()
 

@@ -171,6 +171,9 @@ def _delete_file(session: requests.Session, file_id: str) -> None:
 
 @register("soniox")
 class SonioxProvider(APIProvider):
+    def force_streaming_for_model(self, model_variant: str) -> bool:
+        return model_variant == "stt-rt-v5"
+
     def transcribe(
         self,
         model_variant: str,

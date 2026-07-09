@@ -36,6 +36,10 @@ class APIProvider(ABC):
             f"Streaming ASR is not supported for {self.__class__.__name__}"
         )
 
+    def force_streaming_for_model(self, model_variant: str) -> bool:
+        """Return True when a model variant must use the streaming endpoint."""
+        return False
+
 
 _REGISTRY: dict[str, type[APIProvider]] = {}
 

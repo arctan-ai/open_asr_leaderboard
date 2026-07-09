@@ -19,6 +19,11 @@ from providers import get_provider, PermanentError
 load_dotenv()
 
 
+def effective_streaming_for_model(model_name: str, streaming: bool) -> bool:
+    provider, variant = get_provider(model_name)
+    return streaming or provider.force_streaming_for_model(variant)
+
+
 def fetch_audio_urls(dataset_path, config_name, split, batch_size=100, max_retries=20):
     API_URL = "https://datasets-server.huggingface.co/rows"
 
@@ -68,6 +73,10 @@ def transcribe_with_retry(
     prompt=None,
 ):
     provider, variant = get_provider(model_name)
+    effective_streaming = streaming or provider.force_streaming_for_model(variant)
+    if effective_streaming and use_url:
+        raise ValueError("--streaming requires local audio; do not use --use_url")
+
     kwargs = dict(use_url=use_url, language=language)
     if prompt is not None:
         kwargs["prompt"] = prompt
@@ -75,7 +84,9 @@ def transcribe_with_retry(
     while retries <= max_retries:
         try:
             transcribe_fn = (
-                provider.transcribe_streaming if streaming else provider.transcribe
+                provider.transcribe_streaming
+                if effective_streaming
+                else provider.transcribe
             )
             return transcribe_fn(variant, audio_file_path, sample, **kwargs)
         except PermanentError:
@@ -111,7 +122,8 @@ def transcribe_dataset(
     max_workers=4,
     prompt=None,
 ):
-    if streaming and use_url:
+    effective_streaming = effective_streaming_for_model(model_name, streaming)
+    if effective_streaming and use_url:
         raise ValueError("--streaming requires local audio; do not use --use_url")
 
     if use_url:
@@ -136,7 +148,7 @@ def transcribe_dataset(
 
     print(
         f"Transcribing with model: {model_name}, language: {language}, "
-        f"config: {config_name}, mode: {'streaming' if streaming else 'static'}"
+        f"config: {config_name}, mode: {'streaming' if effective_streaming else 'static'}"
     )
 
     def process_sample(sample):
@@ -150,7 +162,7 @@ def transcribe_dataset(
                     None,
                     sample,
                     use_url=True,
-                    streaming=streaming,
+                    streaming=effective_streaming,
                     language=language,
                     prompt=prompt,
                 )
@@ -179,7 +191,7 @@ def transcribe_dataset(
                     tmp_path,
                     sample,
                     use_url=False,
-                    streaming=streaming,
+                    streaming=effective_streaming,
                     language=language,
                     prompt=prompt,
                 )
@@ -301,7 +313,8 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    if args.streaming and args.use_url:
+    effective_streaming = effective_streaming_for_model(args.model_name, args.streaming)
+    if effective_streaming and args.use_url:
         parser.error("--streaming requires local audio; do not use --use_url")
 
     transcribe_dataset(
@@ -311,7 +324,7 @@ if __name__ == "__main__":
         model_name=args.model_name,
         language=args.language,
         use_url=args.use_url,
-        streaming=args.streaming,
+        streaming=effective_streaming,
         max_samples=args.max_samples,
         max_workers=args.max_workers,
         prompt=args.prompt,
