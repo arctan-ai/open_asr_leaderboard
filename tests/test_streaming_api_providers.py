@@ -2,6 +2,7 @@ import asyncio
 import importlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 import types
@@ -38,6 +39,92 @@ class FakeWebSocket:
         if not self.messages:
             raise StopAsyncIteration
         return self.messages.pop(0)
+
+
+class FakeSignal:
+    def __init__(self):
+        self.handlers = []
+
+    def connect(self, handler):
+        self.handlers.append(handler)
+
+    def emit(self, event):
+        for handler in self.handlers:
+            handler(event)
+
+
+class FakeFuture:
+    def get(self):
+        return None
+
+
+def fake_azure_speech_sdk(recognized_texts=(), cancellation=None, stop_session=True):
+    state = types.SimpleNamespace(formats=[], streams=[], configs=[], recognizers=[])
+
+    class AudioStreamFormat:
+        def __init__(self, **kwargs):
+            state.formats.append(kwargs)
+
+    class PushAudioInputStream:
+        def __init__(self, stream_format):
+            self.writes = []
+            self.closed = False
+            state.streams.append(self)
+
+        def write(self, chunk):
+            self.writes.append(chunk)
+
+        def close(self):
+            self.closed = True
+
+    class AudioConfig:
+        def __init__(self, stream):
+            self.stream = stream
+
+    class SpeechConfig:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.speech_recognition_language = None
+            state.configs.append(self)
+
+    class SpeechRecognizer:
+        def __init__(self, **kwargs):
+            self.recognized = FakeSignal()
+            self.recognizing = FakeSignal()
+            self.canceled = FakeSignal()
+            self.session_stopped = FakeSignal()
+            self.stopped = False
+            state.recognizers.append(self)
+
+        def start_continuous_recognition_async(self):
+            for text in recognized_texts:
+                self.recognized.emit(
+                    types.SimpleNamespace(result=types.SimpleNamespace(text=text))
+                )
+            if cancellation is not None:
+                self.canceled.emit(
+                    types.SimpleNamespace(
+                        error_details=cancellation,
+                        result=types.SimpleNamespace(text=""),
+                    )
+                )
+            elif stop_session:
+                self.session_stopped.emit(types.SimpleNamespace())
+            return FakeFuture()
+
+        def stop_continuous_recognition_async(self):
+            self.stopped = True
+            return FakeFuture()
+
+    speech_module = types.ModuleType("azure.cognitiveservices.speech")
+    speech_module.SpeechConfig = SpeechConfig
+    speech_module.SpeechRecognizer = SpeechRecognizer
+    speech_module.audio = types.SimpleNamespace(
+        AudioStreamFormat=AudioStreamFormat,
+        PushAudioInputStream=PushAudioInputStream,
+        AudioConfig=AudioConfig,
+    )
+    return speech_module, state
 
 
 def load_providers():
@@ -343,6 +430,127 @@ class StreamingProviderTest(unittest.TestCase):
 
         self.assertEqual(transcript, "hello world foo bar")
         self.assertIn(json.dumps({"type": "close"}), fake_ws.sent)
+
+    def test_microsoft_streams_pcm16_and_collects_final_results(self):
+        providers = load_providers()
+        from providers import microsoft_azure_provider
+
+        speechsdk, state = fake_azure_speech_sdk(["hello", "world"])
+        azure_module = types.ModuleType("azure")
+        cognitive_module = types.ModuleType("azure.cognitiveservices")
+        azure_module.cognitiveservices = cognitive_module
+        cognitive_module.speech = speechsdk
+
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "azure": azure_module,
+                "azure.cognitiveservices": cognitive_module,
+                "azure.cognitiveservices.speech": speechsdk,
+            },
+        ), mock.patch.dict(
+            os.environ,
+            {
+                "AZURE_SPEECH_ENDPOINT": "https://example.cognitiveservices.azure.com/",
+                "AZURE_SPEECH_KEY": "key",
+            },
+            clear=True,
+        ), mock.patch.object(
+            microsoft_azure_provider.os.path, "isfile", return_value=True
+        ), mock.patch.object(
+            microsoft_azure_provider,
+            "pcm16_chunks",
+            return_value=[b"first", b"second"],
+        ):
+            result = microsoft_azure_provider.MicrosoftAzureProvider().transcribe_streaming(
+                "MAI-Transcribe-1.5",
+                "/tmp/audio.wav",
+                {},
+                language="en",
+            )
+
+        self.assertEqual(result, "hello world")
+        self.assertEqual(
+            state.formats,
+            [{"samples_per_second": 16000, "bits_per_sample": 16, "channels": 1}],
+        )
+        self.assertEqual(state.streams[0].writes, [b"first", b"second"])
+        self.assertTrue(state.streams[0].closed)
+        self.assertEqual(state.configs[0].speech_recognition_language, "en-US")
+        self.assertTrue(state.recognizers[0].stopped)
+
+    def test_microsoft_provider_registration_and_input_guards(self):
+        providers = load_providers()
+        provider, variant = providers.get_provider(
+            "microsoft/MAI-Transcribe-1.5"
+        )
+        self.assertEqual(variant, "MAI-Transcribe-1.5")
+        self.assertEqual(provider.__class__.__name__, "MicrosoftAzureProvider")
+
+        with self.assertRaisesRegex(providers.PermanentError, "only supports"):
+            provider.transcribe_streaming("other-model", "/tmp/audio.wav", {})
+        with self.assertRaisesRegex(providers.PermanentError, "local audio"):
+            provider.transcribe_streaming(
+                "MAI-Transcribe-1.5", None, {}, use_url=True
+            )
+        with self.assertRaisesRegex(providers.PermanentError, "audio file path"):
+            provider.transcribe_streaming("MAI-Transcribe-1.5", None, {})
+
+    def test_microsoft_reports_cancellation_and_timeout(self):
+        providers = load_providers()
+        from providers import microsoft_azure_provider
+
+        for cancellation, expected in [
+            ("authentication failed", "authentication failed"),
+            (None, "timed out"),
+        ]:
+            speechsdk, _ = fake_azure_speech_sdk(
+                cancellation=cancellation, stop_session=False
+            )
+            azure_module = types.ModuleType("azure")
+            cognitive_module = types.ModuleType("azure.cognitiveservices")
+            azure_module.cognitiveservices = cognitive_module
+            cognitive_module.speech = speechsdk
+            with mock.patch.dict(
+                sys.modules,
+                {
+                    "azure": azure_module,
+                    "azure.cognitiveservices": cognitive_module,
+                    "azure.cognitiveservices.speech": speechsdk,
+                },
+            ), mock.patch.dict(
+                os.environ,
+                {
+                    "AZURE_SPEECH_ENDPOINT": "https://example/",
+                    "AZURE_API_KEY": "fallback-key",
+                },
+                clear=True,
+            ), mock.patch.object(
+                microsoft_azure_provider.os.path, "isfile", return_value=True
+            ), mock.patch.object(
+                microsoft_azure_provider, "pcm16_chunks", return_value=[]
+            ), mock.patch.object(
+                microsoft_azure_provider.MicrosoftAzureProvider,
+                "STREAMING_TIMEOUT_SECONDS",
+                0.001,
+            ):
+                with self.assertRaisesRegex(providers.PermanentError, expected):
+                    microsoft_azure_provider.MicrosoftAzureProvider().transcribe_streaming(
+                        "MAI-Transcribe-1.5", "/tmp/audio.wav", {}
+                    )
+
+    def test_microsoft_requires_streaming_credentials(self):
+        providers = load_providers()
+        from providers import microsoft_azure_provider
+
+        provider, _ = providers.get_provider("microsoft/MAI-Transcribe-1.5")
+        with mock.patch.object(
+            microsoft_azure_provider.os.path, "isfile", return_value=True
+        ), mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(ValueError, "AZURE_SPEECH_ENDPOINT"):
+                provider.transcribe_streaming(
+                    "MAI-Transcribe-1.5", "/tmp/audio.wav", {}
+                )
 
 
 if __name__ == "__main__":

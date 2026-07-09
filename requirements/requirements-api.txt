@@ -6,3 +6,4 @@ elevenlabs
 rev-ai
 requests-toolbelt
 websockets
+azure-cognitiveservices-speech
