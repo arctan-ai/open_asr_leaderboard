@@ -92,6 +92,8 @@ for model_cfg in "${MODEL_CONFIGS[@]}"; do
             --env AQUAVOICE_API_KEY="$AQUAVOICE_API_KEY" \
             --env ZOOM_API_KEY="$ZOOM_API_KEY" \
             --env AZURE_API_KEY="$AZURE_API_KEY" \
+            --env AZURE_SPEECH_KEY="$AZURE_SPEECH_KEY" \
+            --env AZURE_SPEECH_ENDPOINT="$AZURE_SPEECH_ENDPOINT" \
             --env AZURE_REGION="$AZURE_REGION" \
             --env HF_AUDIO_DECODER_BACKEND="soundfile" \
             ${NAMESPACE_ARG} \
