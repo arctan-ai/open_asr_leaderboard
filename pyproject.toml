@@ -1,0 +1,31 @@
+[project]
+name = "open-asr-leaderboard"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "arctan-vi",
+    "assemblyai>=0.64.25",
+    "azure-cognitiveservices-speech>=1.50.0",
+    "datasets>=5.0.0",
+    "dotenv>=0.9.9",
+    "elevenlabs>=2.57.0",
+    "evaluate>=0.4.6",
+    "jiwer>=4.0.0",
+    "kaldialign>=0.12.0",
+    "librosa>=0.11.0",
+    "num2words>=0.5.14",
+    "openai>=2.44.0",
+    "peft>=0.19.1",
+    "python-dotenv>=1.2.2",
+    "requests-toolbelt>=1.0.0",
+    "rev-ai>=2.21.0",
+    "soundfile>=0.14.0",
+    "speechmatics-python>=5.0.0.post1",
+    "torch>=2.12.1",
+    "torchcodec>=0.14.0",
+    "transformers>=5.13.0",
+    "websockets>=16.0",
+]
+
+[tool.uv.sources]
+arctan-vi = { path = "../arctan-vi-sdk/dist/arctan_vi-0.7.0-cp314-cp314-linux_x86_64.whl" }
