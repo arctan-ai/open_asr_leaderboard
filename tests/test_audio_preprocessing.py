@@ -1,4 +1,5 @@
 import builtins
+import argparse
 import importlib
 from pathlib import Path
 import sys
@@ -87,6 +88,79 @@ class AudioPreprocessingTest(unittest.TestCase):
 
     def test_none_preprocessor_is_noop(self):
         self.assertIsNone(data_utils._build_audio_preprocess_fn("none", 10))
+
+    def test_cli_exposes_rnnoise_choice(self):
+        parser = argparse.ArgumentParser()
+        data_utils.add_audio_preprocessor_args(parser)
+
+        args = parser.parse_args(["--audio_preprocessor", "rnnoise"])
+
+        self.assertEqual(args.audio_preprocessor, "rnnoise")
+
+    def test_rnnoise_processing_resamples_and_preserves_length(self):
+        class FakeRNNoise:
+            FRAME_SIZE = 480
+
+            def __init__(self):
+                self.created = 0
+                self.destroyed = []
+                self.frames = []
+
+            def create(self):
+                self.created += 1
+                return object()
+
+            def process_mono_frame(self, state, frame):
+                self.frames.append(len(frame))
+                return np.full(len(frame), 16384, dtype=np.int16), 0.5
+
+            def destroy(self, state):
+                self.destroyed.append(state)
+
+        rnnoise = FakeRNNoise()
+        audio = {
+            "array": np.zeros(5, dtype=np.float32),
+            "sampling_rate": 1000,
+        }
+
+        processed = data_utils._process_audio_with_rnnoise(audio, rnnoise)
+
+        self.assertEqual(processed["sampling_rate"], 1000)
+        self.assertEqual(processed["array"].shape, (5,))
+        self.assertEqual(processed["array"].dtype, np.float32)
+        self.assertEqual(rnnoise.created, 1)
+        self.assertEqual(rnnoise.frames, [240])
+        self.assertEqual(len(rnnoise.destroyed), 1)
+        np.testing.assert_allclose(
+            processed["array"],
+            np.full(5, 16384 / 32767, dtype=np.float32),
+            rtol=1e-5,
+        )
+
+    def test_rnnoise_build_is_lazy_and_uses_batch_audio(self):
+        rnnoise = types.SimpleNamespace(
+            FRAME_SIZE=480,
+            create=mock.Mock(return_value=object()),
+            process_mono_frame=mock.Mock(
+                return_value=(np.zeros(480, dtype=np.int16), 0.0)
+            ),
+            destroy=mock.Mock(),
+        )
+        with mock.patch.object(data_utils, "_load_rnnoise_bindings", return_value=rnnoise):
+            preprocess = data_utils._build_audio_preprocess_fn("rnnoise", 10)
+
+        batch = {
+            "audio": [
+                {"array": np.zeros(480, dtype=np.float32), "sampling_rate": 48000}
+            ]
+        }
+        result = preprocess(batch)
+
+        self.assertIs(result, batch)
+        self.assertEqual(result["audio"][0]["sampling_rate"], 48000)
+        self.assertEqual(result["audio"][0]["array"].shape, (480,))
+        rnnoise.create.assert_called_once_with()
+        rnnoise.destroy.assert_called_once()
 
     def test_arctan_processing_preserves_length_and_sample_rate(self):
         audio = {

@@ -1,3 +1,5 @@
+import importlib.metadata
+import importlib.util
 import re
 import os
 import shutil
@@ -82,11 +84,21 @@ def normalize(batch):
     return batch
 
 
-SUPPORTED_AUDIO_PREPROCESSORS = ("none", "arctan", "ai_coustics_vfl_2_1", "krisp_bvc")
+SUPPORTED_AUDIO_PREPROCESSORS = (
+    "none",
+    "arctan",
+    "ai_coustics_vfl_2_1",
+    "krisp_bvc",
+    "rnnoise",
+)
 AI_COUSTICS_FILTER = "aic-quail-vfl"
 KRISP_BVC_FILTER = "BVC"
 AI_COUSTICS_ENV_PROJECT_DIR = "AI_COUSTICS_NOISE_CANCELLER_DIR"
 AI_COUSTICS_LIVEKIT_ENV = ("LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET")
+RNNOISE_SAMPLE_RATE = 48000
+
+
+_RNNOISE_BINDINGS = None
 
 
 def add_audio_preprocessor_args(parser):
@@ -237,6 +249,107 @@ def _process_audio_with_arctan(audio, processor_cls, config_cls, chunk_ms=10):
     return {
         "array": processed_audio.astype(np.float32, copy=False),
         "sampling_rate": sample_rate,
+    }
+
+
+def _load_rnnoise_bindings():
+    """Load PyRNNoise's low-level bindings without importing its audiolab wrapper."""
+    global _RNNOISE_BINDINGS
+    if _RNNOISE_BINDINGS is not None:
+        return _RNNOISE_BINDINGS
+
+    try:
+        distribution = importlib.metadata.distribution("pyrnnoise")
+        module_path = Path(distribution.locate_file("pyrnnoise/rnnoise.py"))
+        spec = importlib.util.spec_from_file_location(
+            "pyrnnoise_rnnoise", module_path
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Could not load PyRNNoise bindings from {module_path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except (ImportError, OSError) as exc:
+        raise RuntimeError(
+            "--audio_preprocessor rnnoise requires the optional 'pyrnnoise' "
+            "package to be installed in the eval environment."
+        ) from exc
+
+    _RNNOISE_BINDINGS = module
+    return module
+
+
+def _resample_audio_linear(
+    samples, source_sample_rate, target_sample_rate, target_length=None
+):
+    import numpy as np
+
+    source_sample_rate = int(source_sample_rate)
+    target_sample_rate = int(target_sample_rate)
+    if source_sample_rate <= 0 or target_sample_rate <= 0:
+        raise ValueError("Audio sample rates must be greater than 0")
+    if target_length is None:
+        target_length = int(
+            round(len(samples) * target_sample_rate / source_sample_rate)
+        )
+    target_length = int(target_length)
+    if len(samples) == target_length:
+        return np.asarray(samples, dtype=np.float32)
+    if len(samples) == 0 or target_length == 0:
+        return np.empty(target_length, dtype=np.float32)
+
+    source_positions = np.arange(len(samples), dtype=np.float64)
+    target_positions = np.linspace(
+        0,
+        len(samples) - 1,
+        num=target_length,
+        dtype=np.float64,
+    )
+    return np.interp(
+        target_positions,
+        source_positions,
+        np.asarray(samples, dtype=np.float32).astype(np.float64),
+    ).astype(np.float32)
+
+
+def _process_audio_with_rnnoise(audio, rnnoise_module):
+    import numpy as np
+
+    input_sample_rate = int(audio["sampling_rate"])
+    samples = np.asarray(audio["array"], dtype=np.float32)
+    if samples.ndim > 1:
+        samples = samples.mean(axis=1)
+    original_num_samples = len(samples)
+    if original_num_samples == 0:
+        return {"array": samples, "sampling_rate": input_sample_rate}
+
+    rnnoise_samples = _resample_audio_linear(
+        samples,
+        input_sample_rate,
+        RNNOISE_SAMPLE_RATE,
+    )
+    frame_size = int(rnnoise_module.FRAME_SIZE)
+    state = rnnoise_module.create()
+    output_frames = []
+    try:
+        for start in range(0, len(rnnoise_samples), frame_size):
+            frame = rnnoise_samples[start : start + frame_size]
+            processed_frame, _ = rnnoise_module.process_mono_frame(state, frame)
+            output_frames.append(
+                np.asarray(processed_frame, dtype=np.float32) / np.float32(32767.0)
+            )
+    finally:
+        rnnoise_module.destroy(state)
+
+    processed = np.concatenate(output_frames)
+    processed = _resample_audio_linear(
+        processed,
+        RNNOISE_SAMPLE_RATE,
+        input_sample_rate,
+        target_length=original_num_samples,
+    )
+    return {
+        "array": processed.astype(np.float32, copy=False),
+        "sampling_rate": input_sample_rate,
     }
 
 
@@ -480,6 +593,18 @@ def _build_audio_preprocess_fn(
                 _process_audio_with_arctan(
                     audio, processor_cls, config_cls, arctan_chunk_ms
                 )
+                for audio in batch["audio"]
+            ]
+            return batch
+
+        return preprocess_audio
+
+    if audio_preprocessor == "rnnoise":
+        rnnoise_module = _load_rnnoise_bindings()
+
+        def preprocess_audio(batch):
+            batch["audio"] = [
+                _process_audio_with_rnnoise(audio, rnnoise_module)
                 for audio in batch["audio"]
             ]
             return batch
