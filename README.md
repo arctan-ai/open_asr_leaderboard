@@ -101,6 +101,8 @@ Available preprocessors:
 - `arctan`: requires the optional `arctan-vi` package and a valid `ARCTAN_SDK_KEY` in the eval environment or `.env` file.
 - `ai_coustics_vfl_2_1`: runs the ai-coustics VFL 2.1 path through the `livekit-examples/noise-canceller` CLI used by [`ai-coustics/lk-noise-canceller-examples`](https://github.com/ai-coustics/lk-noise-canceller-examples). Clone that repo with submodules, set `AI_COUSTICS_NOISE_CANCELLER_DIR` to its `noise-canceller` directory, and set `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET`. The leaderboard wrapper uses filter `aic-quail-vfl`, enhancement level `1.0`, 16 kHz output, a 2-second leading-silence pad, and the CLI's ai-coustics `--direct` mode.
 
+Optional Silero VAD is enabled with `--vad_position=pre` or `--vad_position=post`. `pre` applies VAD before the selected audio preprocessor; `post` applies it after preprocessing and before ASR. Without a preprocessor, both positions are equivalent. VAD preserves clip duration by replacing non-speech samples with zeros and uses a fixed threshold of `0.45`, minimum silence of `100 ms`, speech padding of `150 ms`, and Silero's default minimum speech duration of `250 ms`. VAD requires local 8 kHz or 16 kHz audio and cannot be combined with API `--use_url` mode.
+
 The `.env` file is loaded with `python-dotenv` when audio preprocessing is enabled. The default is `--audio_preprocessor=none`, which preserves the existing evaluation path. API URL mode, multilingual scripts, Nemo scripts, and long-form scripts are not wired for this MVP path. Reported RTFx still measures ASR inference time only; preprocessing runs before the timed transcription section.
 
 # Trade-off plots

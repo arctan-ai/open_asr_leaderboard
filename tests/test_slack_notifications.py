@@ -69,6 +69,20 @@ def sample_metrics():
 
 
 class SlackNotificationTest(unittest.TestCase):
+    def test_run_metadata_includes_vad_position(self):
+        lines = eval_utils._build_run_metadata_lines(
+            "acme/model",
+            "hf-audio/open-asr-leaderboard",
+            "ami",
+            "test",
+            10,
+            4,
+            "arctan",
+            vad_position="post",
+        )
+
+        self.assertIn("*VAD position:* `post`", lines)
+
     def test_missing_slack_env_skips_http_call(self):
         metrics = sample_metrics()
         with mock.patch.dict(os.environ, {}, clear=True):

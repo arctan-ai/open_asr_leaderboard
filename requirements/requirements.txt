@@ -8,4 +8,5 @@ num2words
 peft
 python-dotenv
 soundfile
+silero-vad
 kaldialign

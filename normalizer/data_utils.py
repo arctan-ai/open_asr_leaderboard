@@ -83,6 +83,10 @@ def normalize(batch):
 
 
 SUPPORTED_AUDIO_PREPROCESSORS = ("none", "arctan", "ai_coustics_vfl_2_1", "krisp_bvc")
+SUPPORTED_VAD_POSITIONS = ("none", "pre", "post")
+SILERO_VAD_THRESHOLD = 0.45
+SILERO_VAD_MIN_SILENCE_MS = 100
+SILERO_VAD_SPEECH_PAD_MS = 150
 AI_COUSTICS_FILTER = "aic-quail-vfl"
 KRISP_BVC_FILTER = "BVC"
 AI_COUSTICS_ENV_PROJECT_DIR = "AI_COUSTICS_NOISE_CANCELLER_DIR"
@@ -158,6 +162,15 @@ def add_audio_preprocessor_args(parser):
         default=1,
         help="Batch size for eval-time audio preprocessing.",
     )
+    parser.add_argument(
+        "--vad_position",
+        choices=SUPPORTED_VAD_POSITIONS,
+        default="none",
+        help=(
+            "Optional duration-preserving Silero VAD placement: before (pre) or "
+            "after (post) the selected audio preprocessor."
+        ),
+    )
 
 
 def _get_arg(args, name, default):
@@ -194,6 +207,75 @@ def _load_arctan_processor():
         )
 
     return Processor, ProcessorConfig
+
+
+def _load_silero_vad():
+    try:
+        from silero_vad import get_speech_timestamps, load_silero_vad
+    except ImportError as exc:
+        raise RuntimeError(
+            "--vad_position pre/post requires the optional 'silero-vad' package "
+            "to be installed in the eval environment."
+        ) from exc
+
+    return load_silero_vad(), get_speech_timestamps
+
+
+def _process_audio_with_silero_vad(audio, model, get_speech_timestamps):
+    import numpy as np
+
+    sample_rate = int(audio["sampling_rate"])
+    if sample_rate not in (8000, 16000):
+        raise ValueError(
+            "Silero VAD requires 8000 Hz or 16000 Hz audio; "
+            f"got {sample_rate} Hz"
+        )
+
+    import torch
+
+    samples = np.asarray(audio["array"], dtype=np.float32)
+    if samples.ndim > 1:
+        samples = samples.mean(axis=1)
+
+    speech_timestamps = get_speech_timestamps(
+        torch.from_numpy(samples),
+        model,
+        threshold=SILERO_VAD_THRESHOLD,
+        sampling_rate=sample_rate,
+        min_silence_duration_ms=SILERO_VAD_MIN_SILENCE_MS,
+        speech_pad_ms=SILERO_VAD_SPEECH_PAD_MS,
+    )
+    vad_audio = np.zeros_like(samples, dtype=np.float32)
+    for segment in speech_timestamps:
+        start = max(0, min(len(samples), int(segment["start"])))
+        end = max(start, min(len(samples), int(segment["end"])))
+        vad_audio[start:end] = samples[start:end]
+
+    return {
+        "array": vad_audio,
+        "sampling_rate": sample_rate,
+    }
+
+
+def _build_vad_fn(vad_position):
+    if vad_position == "none":
+        return None
+    if vad_position not in SUPPORTED_VAD_POSITIONS:
+        raise ValueError(
+            f"Unsupported VAD position: {vad_position}. "
+            f"Expected one of {SUPPORTED_VAD_POSITIONS}."
+        )
+
+    model, get_speech_timestamps = _load_silero_vad()
+
+    def apply_vad(batch):
+        batch["audio"] = [
+            _process_audio_with_silero_vad(audio, model, get_speech_timestamps)
+            for audio in batch["audio"]
+        ]
+        return batch
+
+    return apply_vad
 
 
 def _process_audio_with_arctan(audio, processor_cls, config_cls, chunk_ms=10):
@@ -540,6 +622,7 @@ def load_data(args):
 
 def prepare_data(dataset, sampling_rate=16000, args=None):
     audio_preprocessor = _get_arg(args, "audio_preprocessor", "none")
+    vad_position = _get_arg(args, "vad_position", "none")
     arctan_chunk_ms = _get_arg(args, "arctan_chunk_ms", 10)
     ai_coustics_project_dir = _get_arg(args, "ai_coustics_project_dir", None)
     ai_coustics_sample_rate = _get_arg(args, "ai_coustics_sample_rate", 16000)
@@ -554,6 +637,11 @@ def prepare_data(dataset, sampling_rate=16000, args=None):
 
     if audio_preprocessor_batch_size <= 0:
         raise ValueError("--audio_preprocessor_batch_size must be greater than 0")
+    if vad_position not in SUPPORTED_VAD_POSITIONS:
+        raise ValueError(
+            f"Unsupported VAD position: {vad_position}. "
+            f"Expected one of {SUPPORTED_VAD_POSITIONS}."
+        )
 
     # Re-sample and normalize transcriptions
     dataset = dataset.cast_column("audio", Audio(sampling_rate=sampling_rate))
@@ -573,9 +661,24 @@ def prepare_data(dataset, sampling_rate=16000, args=None):
         krisp_bvc_sample_rate,
         krisp_bvc_pad_seconds,
     )
+    vad_fn = _build_vad_fn(vad_position)
+    if vad_position == "pre":
+        dataset = dataset.map(
+            vad_fn,
+            batched=True,
+            batch_size=audio_preprocessor_batch_size,
+            **map_kwargs,
+        )
     if audio_preprocess_fn is not None:
         dataset = dataset.map(
             audio_preprocess_fn,
+            batched=True,
+            batch_size=audio_preprocessor_batch_size,
+            **map_kwargs,
+        )
+    if vad_position == "post":
+        dataset = dataset.map(
+            vad_fn,
             batched=True,
             batch_size=audio_preprocessor_batch_size,
             **map_kwargs,

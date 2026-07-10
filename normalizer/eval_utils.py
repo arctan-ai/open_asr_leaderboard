@@ -72,6 +72,7 @@ def _build_run_metadata_lines(
     max_workers,
     audio_preprocessor,
     streaming=False,
+    vad_position="none",
 ):
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     sample_label = "full split" if max_samples is None else str(max_samples)
@@ -82,6 +83,7 @@ def _build_run_metadata_lines(
         f"*Samples:* `{sample_label}`",
         f"*Workers:* `{max_workers}`",
         f"*Audio preprocessor:* `{audio_preprocessor}`",
+        f"*VAD position:* `{vad_position}`",
         f"*Time:* {timestamp}",
         f"*Host:* `{socket.gethostname()}`",
     ]
@@ -99,6 +101,7 @@ def post_slack_run_started(
     max_workers,
     audio_preprocessor="none",
     streaming=False,
+    vad_position="none",
 ):
     lines = _build_run_metadata_lines(
         model_name,
@@ -109,6 +112,7 @@ def post_slack_run_started(
         max_workers,
         audio_preprocessor,
         streaming=streaming,
+        vad_position=vad_position,
     )
     _post_slack_payload(
         {
@@ -136,6 +140,7 @@ def post_slack_run_failed(
     audio_preprocessor,
     error,
     streaming=False,
+    vad_position="none",
 ):
     lines = _build_run_metadata_lines(
         model_name,
@@ -146,6 +151,7 @@ def post_slack_run_failed(
         max_workers,
         audio_preprocessor,
         streaming=streaming,
+        vad_position=vad_position,
     )
     lines.append(f"*Error:* ```{str(error)[:2500]}```")
     _post_slack_payload(
@@ -288,6 +294,7 @@ def post_slack_single_run_summary(
     num_samples,
     audio_preprocessor="none",
     streaming=False,
+    vad_position="none",
 ):
     result_key = f"{model_name} | {dataset_path}/{dataset_name}/{split}"
     model_key = model_name
@@ -302,6 +309,8 @@ def post_slack_single_run_summary(
     composite_inference_time = {model_key: 1 if rtfx is not None else None}
     count_entries = {model_key: 1}
     label_parts = [audio_preprocessor]
+    if vad_position != "none":
+        label_parts.append(f"vad-{vad_position}")
     if streaming:
         label_parts.append("streaming")
     label_parts.append(f"{num_samples} samples")

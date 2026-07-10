@@ -88,6 +88,152 @@ class AudioPreprocessingTest(unittest.TestCase):
     def test_none_preprocessor_is_noop(self):
         self.assertIsNone(data_utils._build_audio_preprocess_fn("none", 10))
 
+    def test_none_vad_is_noop_and_does_not_load_dependency(self):
+        with mock.patch.object(data_utils, "_load_silero_vad") as load_mock:
+            self.assertIsNone(data_utils._build_vad_fn("none"))
+        load_mock.assert_not_called()
+
+    def test_vad_preserves_length_and_zeros_non_speech(self):
+        torch_stub = types.ModuleType("torch")
+        torch_stub.from_numpy = lambda value: value
+        audio = {
+            "array": np.arange(8, dtype=np.float32),
+            "sampling_rate": 16000,
+        }
+        timestamps = mock.Mock(return_value=[{"start": 2, "end": 5}])
+
+        with mock.patch.dict(sys.modules, {"torch": torch_stub}):
+            processed = data_utils._process_audio_with_silero_vad(
+                audio, object(), timestamps
+            )
+
+        np.testing.assert_array_equal(
+            processed["array"],
+            np.array([0, 0, 2, 3, 4, 0, 0, 0], dtype=np.float32),
+        )
+        self.assertEqual(len(processed["array"]), len(audio["array"]))
+        self.assertEqual(processed["sampling_rate"], 16000)
+        self.assertEqual(processed["array"].dtype, np.float32)
+        self.assertEqual(timestamps.call_args.kwargs["threshold"], 0.45)
+        self.assertEqual(
+            timestamps.call_args.kwargs["min_silence_duration_ms"], 100
+        )
+        self.assertEqual(timestamps.call_args.kwargs["speech_pad_ms"], 150)
+
+    def test_vad_without_detected_speech_returns_same_length_silence(self):
+        torch_stub = types.ModuleType("torch")
+        torch_stub.from_numpy = lambda value: value
+        audio = {
+            "array": np.ones(5, dtype=np.float32),
+            "sampling_rate": 8000,
+        }
+
+        with mock.patch.dict(sys.modules, {"torch": torch_stub}):
+            processed = data_utils._process_audio_with_silero_vad(
+                audio, object(), mock.Mock(return_value=[])
+            )
+
+        np.testing.assert_array_equal(processed["array"], np.zeros(5, np.float32))
+
+    def test_vad_rejects_unsupported_sample_rate(self):
+        audio = {
+            "array": np.ones(5, dtype=np.float32),
+            "sampling_rate": 44100,
+        }
+
+        with self.assertRaisesRegex(ValueError, "8000 Hz or 16000 Hz"):
+            data_utils._process_audio_with_silero_vad(
+                audio, object(), mock.Mock(return_value=[])
+            )
+
+    def test_missing_silero_dependency_fails_only_when_loaded(self):
+        real_import = builtins.__import__
+
+        def import_without_silero(name, *args, **kwargs):
+            if name == "silero_vad":
+                raise ImportError("missing silero-vad")
+            return real_import(name, *args, **kwargs)
+
+        with mock.patch("builtins.__import__", side_effect=import_without_silero):
+            with self.assertRaisesRegex(RuntimeError, "silero-vad"):
+                data_utils._build_vad_fn("pre")
+
+    def test_invalid_vad_position_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Unsupported VAD position"):
+            data_utils._build_vad_fn("both")
+
+    def test_prepare_data_applies_vad_at_selected_position(self):
+        class FakeDataset:
+            def __init__(self):
+                self.steps = []
+
+            def cast_column(self, *args, **kwargs):
+                self.steps.append("cast")
+                return self
+
+            def map(self, fn, *args, **kwargs):
+                self.steps.append(fn.__name__)
+                return self
+
+            def filter(self, *args, **kwargs):
+                self.steps.append("filter")
+                return self
+
+        def preprocess_audio(batch):
+            return batch
+
+        def apply_vad(batch):
+            return batch
+
+        for position, expected in (
+            ("pre", ["cast", "apply_vad", "preprocess_audio", "normalize", "filter"]),
+            ("post", ["cast", "preprocess_audio", "apply_vad", "normalize", "filter"]),
+        ):
+            dataset = FakeDataset()
+            args = types.SimpleNamespace(
+                audio_preprocessor="arctan",
+                vad_position=position,
+            )
+            with mock.patch.object(
+                data_utils, "_build_audio_preprocess_fn", return_value=preprocess_audio
+            ), mock.patch.object(data_utils, "_build_vad_fn", return_value=apply_vad):
+                data_utils.prepare_data(dataset, args=args)
+            self.assertEqual(dataset.steps, expected)
+
+    def test_pre_and_post_vad_are_equivalent_without_preprocessor(self):
+        class FakeDataset:
+            def __init__(self):
+                self.steps = []
+
+            def cast_column(self, *args, **kwargs):
+                self.steps.append("cast")
+                return self
+
+            def map(self, fn, *args, **kwargs):
+                self.steps.append(fn.__name__)
+                return self
+
+            def filter(self, *args, **kwargs):
+                return self
+
+        def apply_vad(batch):
+            return batch
+
+        observed = []
+        for position in ("pre", "post"):
+            dataset = FakeDataset()
+            args = types.SimpleNamespace(
+                audio_preprocessor="none",
+                vad_position=position,
+            )
+            with mock.patch.object(
+                data_utils, "_build_audio_preprocess_fn", return_value=None
+            ), mock.patch.object(data_utils, "_build_vad_fn", return_value=apply_vad):
+                data_utils.prepare_data(dataset, args=args)
+            observed.append(dataset.steps)
+
+        self.assertEqual(observed[0], observed[1])
+
     def test_arctan_processing_preserves_length_and_sample_rate(self):
         audio = {
             "array": np.zeros(5, dtype=np.float32),
