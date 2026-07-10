@@ -18,6 +18,47 @@ MIME_MAP = {
 }
 
 
+def _format_cancellation(event, cancellation_details=None) -> str:
+    parts = []
+    result = getattr(event, "result", None)
+    for label, obj, attr in (
+        ("reason", event, "reason"),
+        ("reason", result, "reason"),
+        ("reason", cancellation_details, "reason"),
+        ("error_code", event, "error_code"),
+        ("error_code", result, "error_code"),
+        ("error_code", cancellation_details, "error_code"),
+        ("error_details", event, "error_details"),
+        ("error_details", result, "error_details"),
+        ("error_details", cancellation_details, "error_details"),
+        ("text", result, "text"),
+    ):
+        value = getattr(obj, attr, None) if obj is not None else None
+        if value:
+            parts.append(f"{label}={value}")
+    return "; ".join(dict.fromkeys(parts)) or "Azure Speech recognition canceled"
+
+
+def _get_cancellation_details(speechsdk, result):
+    details_cls = getattr(speechsdk, "CancellationDetails", None)
+    if details_cls is None or result is None:
+        return None
+
+    try:
+        return details_cls(result)
+    except TypeError:
+        pass
+
+    from_result = getattr(details_cls, "from_result", None)
+    if from_result is None:
+        return None
+    return from_result(result)
+
+
+def _is_end_of_stream_cancellation(cancellation_message: str) -> bool:
+    return "CancellationReason.EndOfStream" in cancellation_message
+
+
 @register("microsoft")
 class MicrosoftAzureProvider(APIProvider):
     ENDPOINT = "https://northeurope.api.cognitive.microsoft.com/speechtotext/transcriptions:transcribe?api-version=2025-10-15"
@@ -168,10 +209,10 @@ class MicrosoftAzureProvider(APIProvider):
                 transcripts.append(text)
 
         def on_canceled(event):
-            details = getattr(event, "error_details", "") or getattr(
-                event.result, "text", ""
+            cancellation_details = _get_cancellation_details(
+                speechsdk, getattr(event, "result", None)
             )
-            cancellation.append(details or "Azure Speech recognition canceled")
+            cancellation.append(_format_cancellation(event, cancellation_details))
             finished.set()
 
         recognizer.recognized.connect(on_recognized)
@@ -192,6 +233,8 @@ class MicrosoftAzureProvider(APIProvider):
                     f"{self.STREAMING_TIMEOUT_SECONDS} seconds"
                 )
             if cancellation:
+                if _is_end_of_stream_cancellation(cancellation[0]):
+                    return compact_text(transcripts) or "."
                 raise PermanentError(
                     f"Microsoft streaming recognition canceled: {cancellation[0]}"
                 )

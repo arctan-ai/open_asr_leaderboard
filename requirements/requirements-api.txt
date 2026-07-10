@@ -7,3 +7,4 @@ rev-ai
 requests-toolbelt
 websockets
 azure-cognitiveservices-speech
+pyrnnoise>=0.4.3
