@@ -131,6 +131,8 @@ def transcribe_dataset(
             raise ValueError(
                 "--audio_preprocessor requires local audio; do not use --use_url"
             )
+        if getattr(args, "vad_position", "none") != "none":
+            raise ValueError("--vad_position requires local audio; do not use --use_url")
         audio_rows = fetch_audio_urls(dataset_path, dataset, split)
         if max_samples:
             audio_rows = itertools.islice(audio_rows, max_samples)
@@ -254,6 +256,7 @@ def transcribe_dataset(
         rtfx=rtfx,
         num_samples=len(results["references"]),
         audio_preprocessor=getattr(args, "audio_preprocessor", "none"),
+        vad_position=getattr(args, "vad_position", "none"),
         streaming=effective_streaming,
     )
 
@@ -298,6 +301,8 @@ if __name__ == "__main__":
         parser.error("--streaming requires local audio; do not use --use_url")
     if args.use_url and args.audio_preprocessor != "none":
         parser.error("--audio_preprocessor requires local audio; do not use --use_url")
+    if args.use_url and args.vad_position != "none":
+        parser.error("--vad_position requires local audio; do not use --use_url")
 
     data_utils.post_slack_run_started(
         model_name=args.model_name,
@@ -307,6 +312,7 @@ if __name__ == "__main__":
         max_samples=args.max_samples,
         max_workers=args.max_workers,
         audio_preprocessor=args.audio_preprocessor,
+        vad_position=args.vad_position,
         streaming=effective_streaming,
     )
     try:
@@ -331,6 +337,7 @@ if __name__ == "__main__":
             max_samples=args.max_samples,
             max_workers=args.max_workers,
             audio_preprocessor=args.audio_preprocessor,
+            vad_position=args.vad_position,
             error=exc,
             streaming=effective_streaming,
         )

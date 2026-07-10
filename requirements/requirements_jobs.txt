@@ -8,3 +8,4 @@ num2words
 python-dotenv
 pyrnnoise>=0.4.3
 kaldialign==0.12.0
+silero-vad

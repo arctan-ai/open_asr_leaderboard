@@ -378,6 +378,22 @@ class StreamingProviderTest(unittest.TestCase):
                 streaming=True,
             )
 
+    def test_vad_use_url_is_rejected(self):
+        run_eval = load_run_eval("run_eval")
+
+        with self.assertRaisesRegex(ValueError, "--vad_position requires local audio"):
+            run_eval.transcribe_dataset(
+                "dataset",
+                "config",
+                "test",
+                "deepgram/nova-3",
+                use_url=True,
+                args=types.SimpleNamespace(
+                    audio_preprocessor="none",
+                    vad_position="pre",
+                ),
+            )
+
     def test_deepgram_collects_final_messages(self):
         load_providers()
         from providers import deepgram_provider
