@@ -58,7 +58,16 @@ class FakeFuture:
         return None
 
 
-def fake_azure_speech_sdk(recognized_texts=(), cancellation=None, stop_session=True):
+def fake_azure_speech_sdk(
+    recognized_texts=(),
+    cancellation=None,
+    stop_session=True,
+    cancellation_reason=None,
+    cancellation_error_code=None,
+    details_reason=None,
+    details_error_code=None,
+    details_error_details=None,
+):
     state = types.SimpleNamespace(formats=[], streams=[], configs=[], recognizers=[])
 
     class AudioStreamFormat:
@@ -104,6 +113,8 @@ def fake_azure_speech_sdk(recognized_texts=(), cancellation=None, stop_session=T
             if cancellation is not None:
                 self.canceled.emit(
                     types.SimpleNamespace(
+                        reason=cancellation_reason,
+                        error_code=cancellation_error_code,
                         error_details=cancellation,
                         result=types.SimpleNamespace(text=""),
                     )
@@ -116,9 +127,18 @@ def fake_azure_speech_sdk(recognized_texts=(), cancellation=None, stop_session=T
             self.stopped = True
             return FakeFuture()
 
+    class CancellationDetails:
+        def __new__(cls, result):
+            return types.SimpleNamespace(
+                reason=details_reason,
+                error_code=details_error_code,
+                error_details=details_error_details,
+            )
+
     speech_module = types.ModuleType("azure.cognitiveservices.speech")
     speech_module.SpeechConfig = SpeechConfig
     speech_module.SpeechRecognizer = SpeechRecognizer
+    speech_module.CancellationDetails = CancellationDetails
     speech_module.audio = types.SimpleNamespace(
         AudioStreamFormat=AudioStreamFormat,
         PushAudioInputStream=PushAudioInputStream,
@@ -500,12 +520,24 @@ class StreamingProviderTest(unittest.TestCase):
         providers = load_providers()
         from providers import microsoft_azure_provider
 
-        for cancellation, expected in [
-            ("authentication failed", "authentication failed"),
-            (None, "timed out"),
+        for cancellation, expected, reason, error_code in [
+            (
+                "",
+                "reason=Error; error_code=AuthenticationFailure; "
+                "error_details=authentication failed",
+                "ResultReason.Canceled",
+                None,
+            ),
+            (None, "timed out", None, None),
         ]:
             speechsdk, _ = fake_azure_speech_sdk(
-                cancellation=cancellation, stop_session=False
+                cancellation=cancellation,
+                stop_session=False,
+                cancellation_reason=reason,
+                cancellation_error_code=error_code,
+                details_reason="Error" if reason else None,
+                details_error_code="AuthenticationFailure" if reason else None,
+                details_error_details="authentication failed" if reason else None,
             )
             azure_module = types.ModuleType("azure")
             cognitive_module = types.ModuleType("azure.cognitiveservices")
@@ -538,6 +570,46 @@ class StreamingProviderTest(unittest.TestCase):
                     microsoft_azure_provider.MicrosoftAzureProvider().transcribe_streaming(
                         "MAI-Transcribe-1.5", "/tmp/audio.wav", {}
                     )
+
+    def test_microsoft_treats_end_of_stream_cancellation_as_completion(self):
+        providers = load_providers()
+        from providers import microsoft_azure_provider
+
+        speechsdk, _ = fake_azure_speech_sdk(
+            recognized_texts=["hello"],
+            cancellation="",
+            stop_session=False,
+            cancellation_reason="ResultReason.Canceled",
+            details_reason="CancellationReason.EndOfStream",
+        )
+        azure_module = types.ModuleType("azure")
+        cognitive_module = types.ModuleType("azure.cognitiveservices")
+        azure_module.cognitiveservices = cognitive_module
+        cognitive_module.speech = speechsdk
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "azure": azure_module,
+                "azure.cognitiveservices": cognitive_module,
+                "azure.cognitiveservices.speech": speechsdk,
+            },
+        ), mock.patch.dict(
+            os.environ,
+            {
+                "AZURE_SPEECH_ENDPOINT": "https://example/",
+                "AZURE_API_KEY": "fallback-key",
+            },
+            clear=True,
+        ), mock.patch.object(
+            microsoft_azure_provider.os.path, "isfile", return_value=True
+        ), mock.patch.object(
+            microsoft_azure_provider, "pcm16_chunks", return_value=[]
+        ):
+            result = microsoft_azure_provider.MicrosoftAzureProvider().transcribe_streaming(
+                "MAI-Transcribe-1.5", "/tmp/audio.wav", {}
+            )
+
+        self.assertEqual(result, "hello")
 
     def test_microsoft_requires_streaming_credentials(self):
         providers = load_providers()
