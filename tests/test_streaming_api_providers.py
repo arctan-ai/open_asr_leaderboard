@@ -576,6 +576,46 @@ class StreamingProviderTest(unittest.TestCase):
         self.assertEqual(transcript, "hello world foo bar")
         self.assertIn(json.dumps({"type": "close"}), fake_ws.sent)
 
+    def test_cartesia_static_passes_selected_language(self):
+        load_providers()
+        from providers import cartesia_provider
+
+        response = mock.Mock(status_code=200, text="ok")
+        response.json.return_value = {"text": "hola"}
+        response.raise_for_status.return_value = None
+        with tempfile.NamedTemporaryFile(suffix=".wav") as audio_file:
+            with mock.patch.dict(os.environ, {"CARTESIA_API_KEY": "key"}):
+                with mock.patch.object(
+                    cartesia_provider.requests, "post", return_value=response
+                ) as post:
+                    result = cartesia_provider.CartesiaProvider().transcribe(
+                        "ink-whisper", audio_file.name, {}, language="es"
+                    )
+
+        self.assertEqual(result, "hola")
+        self.assertEqual(
+            post.call_args.kwargs["data"],
+            {"model": "ink-whisper", "language": "es"},
+        )
+
+    def test_soniox_auto_detection_omits_language_hints(self):
+        load_providers()
+        from providers import soniox_provider
+
+        response = mock.Mock(status_code=200, text="ok")
+        response.json.return_value = {"id": "transcription-id"}
+        response.raise_for_status.return_value = None
+        session = mock.Mock()
+        session.post.return_value = response
+
+        soniox_provider._create_transcription(
+            session, "stt-async-v5", "file-id", "unknown"
+        )
+        self.assertEqual(
+            session.post.call_args.kwargs["json"],
+            {"model": "stt-async-v5", "file_id": "file-id"},
+        )
+
     def test_sarvam_registration_and_static_request(self):
         providers = load_providers()
         from providers import sarvam_provider

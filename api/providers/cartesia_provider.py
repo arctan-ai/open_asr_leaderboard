@@ -89,11 +89,15 @@ class CartesiaProvider(APIProvider):
             "Cartesia-Version": CARTESIA_API_VERSION,
         }
 
+        form_data = {"model": model}
+        if language != "unknown":
+            form_data["language"] = language
+
         with open(audio_file_path, "rb") as audio_file:
             response = requests.post(
                 CARTESIA_STT_ENDPOINT,
                 headers=headers,
-                data={"model": model},
+                data=form_data,
                 files={"file": audio_file},
                 timeout=300,
             )

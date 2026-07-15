@@ -20,6 +20,8 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
+from api.language_catalog import MODEL_LANGUAGES, effective_mode, language_options
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RESULTS_ROOT = REPO_ROOT / "results" / "ui-runs"
 DEFAULT_WEB_DIST = REPO_ROOT / "web" / "dist"
@@ -126,6 +128,18 @@ class RunCreate(BaseModel):
                 f"{prefix}/{model}" for model in PROVIDERS[prefix]["models"]
             )
             raise ValueError(f"Unsupported model_name. Allowed values: {allowed}")
+        mode = effective_mode(self.model_name, self.streaming)
+        supported_languages = language_options(self.model_name, self.streaming)
+        if not supported_languages:
+            raise ValueError(
+                f"{self.model_name} does not support {mode} evaluation in the console"
+            )
+        supported_codes = {option["code"] for option in supported_languages}
+        if self.language not in supported_codes:
+            raise ValueError(
+                f"Unsupported language '{self.language}' for {self.model_name} "
+                f"in {mode} mode. Allowed values: {', '.join(sorted(supported_codes))}"
+            )
         forced_streaming = self.model_name == "soniox/stt-rt-v5"
         if self.use_url and (self.streaming or forced_streaming):
             raise ValueError("URL mode cannot be combined with streaming")
@@ -451,6 +465,10 @@ def options_payload() -> dict:
                 "prefix": prefix,
                 "label": provider["label"],
                 "models": provider["models"],
+                "language_options": {
+                    model: MODEL_LANGUAGES[f"{prefix}/{model}"]
+                    for model in provider["models"]
+                },
                 "configured": all(
                     env_configured(name) for name in provider["credentials"]
                 ),

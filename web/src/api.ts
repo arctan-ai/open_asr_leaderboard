@@ -2,8 +2,14 @@ export type Provider = {
   prefix: string
   label: string
   models: string[]
+  language_options: Record<string, {
+    batch: LanguageOption[]
+    streaming: LanguageOption[]
+  }>
   configured: boolean
 }
+
+export type LanguageOption = { code: string; label: string }
 
 export type Options = {
   providers: Provider[]

@@ -5,8 +5,14 @@ import App from "./App"
 
 const options = {
   providers: [
-    { prefix: "deepgram", label: "Deepgram", models: ["nova-3"], configured: true },
-    { prefix: "sarvam", label: "Sarvam", models: ["saaras:v3"], configured: true },
+    {
+      prefix: "deepgram", label: "Deepgram", models: ["nova-3"], configured: true,
+      language_options: { "nova-3": { batch: [{ code: "multi", label: "Multilingual / code-switching" }, { code: "en", label: "English" }, { code: "es", label: "Spanish" }], streaming: [{ code: "multi", label: "Multilingual / code-switching" }, { code: "en", label: "English" }] } },
+    },
+    {
+      prefix: "sarvam", label: "Sarvam", models: ["saaras:v3"], configured: true,
+      language_options: { "saaras:v3": { batch: [{ code: "unknown", label: "Automatic detection" }, { code: "en-IN", label: "English (India)" }], streaming: [{ code: "unknown", label: "Automatic detection" }, { code: "en-IN", label: "English (India)" }] } },
+    },
   ],
   preprocessors: ["none", "arctan", "rnnoise"],
   vad_positions: ["none", "pre", "post"],
@@ -102,12 +108,46 @@ describe("Open ASR console", () => {
     await user.click(screen.getAllByRole("combobox")[0])
     await user.click(await screen.findByRole("option", { name: "Sarvam · saaras:v3" }))
     await user.click(screen.getAllByRole("combobox")[1])
-    await user.click(await screen.findByRole("option", { name: "Automatic detection" }))
+    await user.click(await screen.findByRole("option", { name: "Automatic detection (unknown)" }))
     await user.click(screen.getByRole("button", { name: "Run evaluation" }))
 
     await waitFor(() => {
       const createCall = vi.mocked(fetch).mock.calls.find(([path, init]) => path === "/api/runs" && init?.method === "POST")
       expect(JSON.parse(String(createCall?.[1]?.body))).toEqual(expect.objectContaining({ model_name: "sarvam/saaras:v3", language: "unknown" }))
+    })
+  })
+
+  it("updates language options when the model changes", async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    await screen.findByText("Configure a run")
+    await user.click(screen.getAllByRole("combobox")[1])
+    expect(await screen.findByRole("option", { name: "Spanish (es)" })).toBeInTheDocument()
+    await user.click(screen.getByRole("option", { name: "English (en)" }))
+
+    await user.click(screen.getAllByRole("combobox")[0])
+    await user.click(await screen.findByRole("option", { name: "Sarvam · saaras:v3" }))
+
+    await waitFor(() => {
+      expect(screen.getAllByRole("combobox")[1]).toHaveTextContent("Automatic detection")
+    })
+    await user.click(screen.getAllByRole("combobox")[1])
+    expect(screen.queryByRole("option", { name: "Spanish (es)" })).not.toBeInTheDocument()
+    expect(await screen.findByRole("option", { name: "English (India) (en-IN)" })).toBeInTheDocument()
+  })
+
+  it("resets a language that is unsupported in streaming mode", async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    await screen.findByText("Configure a run")
+    await user.click(screen.getAllByRole("combobox")[1])
+    await user.click(await screen.findByRole("option", { name: "Spanish (es)" }))
+    await user.click(screen.getByRole("switch", { name: "Streaming endpoint" }))
+
+    await waitFor(() => {
+      expect(screen.getAllByRole("combobox")[1]).toHaveTextContent("Multilingual / code-switching")
     })
   })
 })
