@@ -95,19 +95,39 @@ class UiServerTest(unittest.TestCase):
                 model_name="soniox/stt-rt-v5",
                 use_url=True,
             )
+        with self.assertRaisesRegex(ValueError, "Sarvam requires local audio"):
+            self.request(
+                model_name="sarvam/saaras:v3",
+                use_url=True,
+                audio_preprocessor="none",
+            )
 
     def test_validation_rejects_unregistered_model(self):
         with self.assertRaisesRegex(ValueError, "Unsupported model_name"):
             self.request(model_name="deepgram/not-a-real-model")
 
     def test_command_is_an_argument_list_and_uses_unique_output(self):
-        request = self.request(dataset_path="dataset; touch /tmp/not-run")
+        request = self.request(
+            dataset_path="dataset; touch /tmp/not-run", language="unknown"
+        )
         output = self.root / "isolated"
         command = self.manager.build_command(request, output)
 
         self.assertIn("dataset; touch /tmp/not-run", command)
         self.assertEqual(command[command.index("--output_dir") + 1], str(output))
+        self.assertEqual(command[command.index("--language") + 1], "unknown")
         self.assertNotIn("sh", command[:2])
+
+    def test_sarvam_is_exposed_with_credential_status(self):
+        with mock.patch.dict(os.environ, {"SARVAM_API_KEY": "configured"}, clear=True):
+            payload = options_payload()
+
+        sarvam = next(
+            provider for provider in payload["providers"] if provider["prefix"] == "sarvam"
+        )
+        self.assertEqual(sarvam["models"], ["saaras:v3"])
+        self.assertTrue(sarvam["configured"])
+        self.assertTrue(payload["credentials"]["SARVAM_API_KEY"])
 
     def test_completed_run_persists_summary_and_artifacts(self):
         with mock.patch.dict(os.environ, {"DEEPGRAM_API_KEY": "configured"}):
