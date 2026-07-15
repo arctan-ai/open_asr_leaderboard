@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
 import signal
 import sqlite3
 import subprocess
@@ -9,15 +10,19 @@ import sys
 import threading
 import uuid
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
+from authlib.integrations.starlette_client import OAuth
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
+from starlette.middleware.sessions import SessionMiddleware
 
 from api.dataset_catalog import (
     DatasetValidationError,
@@ -32,6 +37,8 @@ DEFAULT_RESULTS_ROOT = REPO_ROOT / "results" / "ui-runs"
 DEFAULT_WEB_DIST = REPO_ROOT / "web" / "dist"
 RUNNER_PATH = REPO_ROOT / "api" / "run_eval.py"
 TERMINAL_STATES = {"completed", "failed", "cancelled", "interrupted"}
+GOOGLE_DISCOVERY_URL = "https://accounts.google.com/.well-known/openid-configuration"
+SESSION_MAX_AGE_SECONDS = 8 * 60 * 60
 
 PROVIDERS = {
     "assembly": {
@@ -84,6 +91,105 @@ PREPROCESSOR_CREDENTIALS = {
     ],
     "krisp_bvc": ["LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"],
 }
+
+
+@dataclass(frozen=True)
+class AuthSettings:
+    client_id: str = ""
+    client_secret: str = ""
+    session_secret: str = ""
+    public_url: str = ""
+    google_domain: str = "arctan.ai"
+    enabled: bool = True
+
+    @classmethod
+    def from_env(cls) -> "AuthSettings":
+        return cls(
+            client_id=os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip(),
+            client_secret=os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip(),
+            session_secret=os.environ.get("OPEN_ASR_SESSION_SECRET", "").strip(),
+            public_url=os.environ.get("OPEN_ASR_PUBLIC_URL", "").strip().rstrip("/"),
+            google_domain=(
+                os.environ.get("OPEN_ASR_GOOGLE_DOMAIN", "arctan.ai").strip().lower()
+                or "arctan.ai"
+            ),
+        )
+
+    @classmethod
+    def disabled_for_tests(cls) -> "AuthSettings":
+        return cls(enabled=False)
+
+    @property
+    def missing(self) -> list[str]:
+        values = {
+            "GOOGLE_OAUTH_CLIENT_ID": self.client_id,
+            "GOOGLE_OAUTH_CLIENT_SECRET": self.client_secret,
+            "OPEN_ASR_SESSION_SECRET": self.session_secret,
+            "OPEN_ASR_PUBLIC_URL": self.public_url,
+        }
+        missing = [name for name, value in values.items() if not value]
+        if self.session_secret and len(self.session_secret) < 32:
+            missing.append("OPEN_ASR_SESSION_SECRET (must be at least 32 characters)")
+        if self.public_url:
+            parsed = urlsplit(self.public_url)
+            if (
+                parsed.scheme != "https"
+                or not parsed.netloc
+                or parsed.path not in {"", "/"}
+                or parsed.query
+                or parsed.fragment
+                or parsed.username
+                or parsed.password
+            ):
+                missing.append("OPEN_ASR_PUBLIC_URL (must be an HTTPS origin)")
+        return missing
+
+    @property
+    def configured(self) -> bool:
+        return not self.missing
+
+    @property
+    def callback_url(self) -> str:
+        return f"{self.public_url}/auth/google/callback"
+
+
+class ConsoleAuthMiddleware:
+    def __init__(self, app, settings: AuthSettings):
+        self.app = app
+        self.settings = settings
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope, receive=receive)
+        path = request.url.path
+        if not self.settings.enabled or path in {
+            "/healthz",
+            "/auth/google/login",
+            "/auth/google/callback",
+        }:
+            await self.app(scope, receive, send)
+            return
+        if not self.settings.configured:
+            response = JSONResponse(
+                {
+                    "detail": "Google authentication is not configured",
+                    "missing": self.settings.missing,
+                },
+                status_code=503,
+            )
+        elif request.session.get("user"):
+            await self.app(scope, receive, send)
+            return
+        elif path == "/api" or path.startswith("/api/"):
+            response = JSONResponse(
+                {"detail": "Authentication required"}, status_code=401
+            )
+        else:
+            response = RedirectResponse("/auth/google/login", status_code=303)
+        await response(scope, receive, send)
 
 
 def now_iso() -> str:
@@ -545,8 +651,20 @@ def create_app(
     results_root: Path | None = None,
     runner_path: Path = RUNNER_PATH,
     web_dist: Path = DEFAULT_WEB_DIST,
+    auth_settings: AuthSettings | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Open ASR Evaluation Console", version="0.1.0")
+    auth = auth_settings or AuthSettings.from_env()
+    oauth = OAuth()
+    google_oauth = None
+    if auth.enabled and auth.configured:
+        google_oauth = oauth.register(
+            name="google",
+            client_id=auth.client_id,
+            client_secret=auth.client_secret,
+            server_metadata_url=GOOGLE_DISCOVERY_URL,
+            client_kwargs={"scope": "openid email profile"},
+        )
     store = RunStore(
         results_root
         or Path(os.environ.get("OPEN_ASR_UI_RESULTS_DIR", DEFAULT_RESULTS_ROOT))
@@ -554,17 +672,91 @@ def create_app(
     manager = RunManager(store, runner_path=runner_path)
     app.state.store = store
     app.state.manager = manager
+    app.state.auth_settings = auth
+    app.state.oauth = oauth
+    app.state.google_oauth = google_oauth
+
+    @app.get("/healthz", include_in_schema=False)
+    async def liveness():
+        return {"status": "ok"}
+
+    @app.get("/auth/google/login", include_in_schema=False)
+    async def google_login(request: Request):
+        if not auth.enabled:
+            return RedirectResponse("/", status_code=303)
+        if not auth.configured or app.state.google_oauth is None:
+            return JSONResponse(
+                {
+                    "detail": "Google authentication is not configured",
+                    "missing": auth.missing,
+                },
+                status_code=503,
+            )
+        return await app.state.google_oauth.authorize_redirect(
+            request,
+            auth.callback_url,
+            hd=auth.google_domain,
+        )
+
+    @app.get("/auth/google/callback", include_in_schema=False)
+    async def google_callback(request: Request):
+        if not auth.enabled:
+            return RedirectResponse("/", status_code=303)
+        if not auth.configured or app.state.google_oauth is None:
+            return JSONResponse(
+                {
+                    "detail": "Google authentication is not configured",
+                    "missing": auth.missing,
+                },
+                status_code=503,
+            )
+        try:
+            token = await app.state.google_oauth.authorize_access_token(request)
+        except Exception:
+            request.session.clear()
+            return JSONResponse({"detail": "Google sign-in failed"}, status_code=400)
+
+        identity = token.get("userinfo") or {}
+        if (
+            identity.get("email_verified") is not True
+            or str(identity.get("hd", "")).lower() != auth.google_domain
+        ):
+            request.session.clear()
+            return JSONResponse(
+                {"detail": f"Access is restricted to {auth.google_domain}"},
+                status_code=403,
+            )
+        if not identity.get("sub") or not identity.get("email"):
+            request.session.clear()
+            return JSONResponse({"detail": "Google identity is incomplete"}, status_code=400)
+
+        request.session.clear()
+        request.session["user"] = {
+            "id": str(identity["sub"]),
+            "email": str(identity["email"]),
+            "name": str(identity.get("name") or identity["email"]),
+        }
+        return RedirectResponse("/", status_code=303)
+
+    @app.get("/api/auth/me")
+    async def current_user(request: Request):
+        return request.session["user"]
+
+    @app.post("/api/auth/logout", status_code=204)
+    async def logout(request: Request):
+        request.session.clear()
 
     @app.get("/api/health")
-    def health():
+    async def health():
+        runs = await asyncio.to_thread(store.list)
         active = sum(
-            run["status"] in {"queued", "running", "cancelling"} for run in store.list()
+            run["status"] in {"queued", "running", "cancelling"} for run in runs
         )
         return {"status": "ok", "active_runs": active}
 
     @app.get("/api/options")
-    def options():
-        return options_payload()
+    async def options():
+        return await asyncio.to_thread(options_payload)
 
     @app.get("/api/datasets")
     async def list_datasets(source_id: str):
@@ -608,9 +800,9 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/runs", status_code=201)
-    def create_run(request: RunCreate):
+    async def create_run(request: RunCreate):
         try:
-            return manager.start(request)
+            return await asyncio.to_thread(manager.start, request)
         except DatasetValidationError as exc:
             raise HTTPException(
                 status_code=400,
@@ -620,27 +812,27 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/runs")
-    def list_runs():
-        return store.list()
+    async def list_runs():
+        return await asyncio.to_thread(store.list)
 
     @app.get("/api/runs/{run_id}")
-    def get_run(run_id: str):
-        run = store.get(run_id)
+    async def get_run(run_id: str):
+        run = await asyncio.to_thread(store.get, run_id)
         if run is None:
             raise HTTPException(status_code=404, detail="Run not found")
         return run
 
     @app.post("/api/runs/{run_id}/cancel")
-    def cancel_run(run_id: str):
+    async def cancel_run(run_id: str):
         try:
-            return manager.cancel(run_id)
+            return await asyncio.to_thread(manager.cancel, run_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="Run not found") from exc
 
     @app.post("/api/runs/{run_id}/retry", status_code=201)
-    def retry_run(run_id: str):
+    async def retry_run(run_id: str):
         try:
-            return manager.retry(run_id)
+            return await asyncio.to_thread(manager.retry, run_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="Run not found") from exc
         except RuntimeError as exc:
@@ -696,8 +888,8 @@ def create_app(
         )
 
     @app.get("/api/runs/{run_id}/artifacts/{name}")
-    def artifact(run_id: str, name: str):
-        run = store.get(run_id)
+    async def artifact(run_id: str, name: str):
+        run = await asyncio.to_thread(store.get, run_id)
         if run is None:
             raise HTTPException(status_code=404, detail="Run not found")
         if Path(name).name != name or not (
@@ -714,7 +906,7 @@ def create_app(
         app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
 
     @app.get("/{full_path:path}", include_in_schema=False)
-    def spa(full_path: str):
+    async def spa(full_path: str):
         if full_path == "api" or full_path.startswith("api/"):
             raise HTTPException(status_code=404, detail="API route not found")
         index_path = web_dist / "index.html"
@@ -726,6 +918,16 @@ def create_app(
                 "frontend": "not built",
             }
         )
+
+    app.add_middleware(ConsoleAuthMiddleware, settings=auth)
+    app.add_middleware(
+        SessionMiddleware,
+        secret_key=auth.session_secret or secrets.token_urlsafe(32),
+        session_cookie="open_asr_session",
+        max_age=SESSION_MAX_AGE_SECONDS,
+        same_site="lax",
+        https_only=auth.enabled,
+    )
 
     return app
 

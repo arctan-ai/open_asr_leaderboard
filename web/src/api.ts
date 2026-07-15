@@ -31,6 +31,7 @@ export type DatasetOption = {
 }
 
 export type DatasetCatalog = { source_id: string; datasets: DatasetOption[] }
+export type AuthUser = { id: string; email: string; name: string }
 
 
 export type Options = {
@@ -105,6 +106,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers: { "Content-Type": "application/json", ...init?.headers },
     ...init,
   })
+  if (response.status === 401) {
+    globalThis.location.assign("/auth/google/login")
+    throw new ApiError("Authentication required")
+  }
   if (!response.ok) {
     const body = await response.json().catch(() => ({ detail: response.statusText }))
     const detail = body.detail
@@ -112,10 +117,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const code = typeof detail === "object" ? detail?.code : undefined
     throw new ApiError(message || "Request failed", code)
   }
+  if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
 }
 
 export const api = {
+  me: () => request<AuthUser>("/api/auth/me"),
+  logout: () => request<void>("/api/auth/logout", { method: "POST" }),
   options: () => request<Options>("/api/options"),
   health: () => request<{ status: string; active_runs: number }>("/api/health"),
   runs: () => request<Run[]>("/api/runs"),

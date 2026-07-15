@@ -313,6 +313,8 @@ def load_evaluation_dataset(
             raise ValueError(
                 "Local dataset audio path escapes the selected dataset directory"
             ) from exc
-        return {"audio": str(resolved)}
+        # ``datasets.Audio`` uses a struct storage type. Returning a bare string
+        # leaves recent PyArrow versions unable to cast the column.
+        return {"audio": {"path": str(resolved), "bytes": None}}
 
     return loaded.map(resolve_audio_path, load_from_cache_file=False)

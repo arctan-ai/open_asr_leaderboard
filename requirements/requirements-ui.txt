@@ -1,4 +1,6 @@
+authlib>=1.6.0
 fastapi>=0.116.0
 httpx>=0.28.1
+itsdangerous>=2.2.0
 silero-vad>=6.2.0
 uvicorn[standard]>=0.35.0

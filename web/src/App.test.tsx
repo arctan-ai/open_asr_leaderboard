@@ -55,6 +55,12 @@ const createdRun = {
   artifacts: [],
 }
 
+const authenticatedUser = {
+  id: "google-user-123",
+  email: "operator@arctan.ai",
+  name: "Arctan Operator",
+}
+
 class FakeEventSource {
   addEventListener = vi.fn()
   close = vi.fn()
@@ -67,8 +73,11 @@ function jsonResponse(body: unknown, status = 200) {
 describe("Open ASR console", () => {
   beforeEach(() => {
     vi.stubGlobal("EventSource", FakeEventSource)
+    vi.stubGlobal("location", { assign: vi.fn() })
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
+      if (path === "/api/auth/me") return jsonResponse(authenticatedUser)
+      if (path === "/api/auth/logout" && init?.method === "POST") return Promise.resolve(new Response(null, { status: 204 }))
       if (path === "/api/options") return jsonResponse(options)
       if (path === "/api/runs" && init?.method === "POST") return jsonResponse(createdRun, 201)
       if (path === "/api/runs") return jsonResponse([])
@@ -95,6 +104,7 @@ describe("Open ASR console", () => {
     render(<App />)
 
     expect(await screen.findByText("Configure a run")).toBeInTheDocument()
+    expect(screen.getByText("operator@arctan.ai")).toBeInTheDocument()
     expect(screen.getByText("Audio → Processor → VAD → ASR")).toBeInTheDocument()
     await waitFor(() => expect(screen.getByRole("button", { name: "Run evaluation" })).toBeEnabled())
     await user.click(screen.getByRole("button", { name: "Run evaluation" }))
@@ -108,6 +118,36 @@ describe("Open ASR console", () => {
     expect((await screen.findAllByText("deepgram/nova-3")).length).toBeGreaterThan(0)
     const createCall = vi.mocked(fetch).mock.calls.find(([path, init]) => path === "/api/runs" && init?.method === "POST")
     expect(JSON.parse(String(createCall?.[1]?.body))).toEqual(expect.objectContaining({ dataset_source: "huggingface", language: "en" }))
+  })
+
+  it("signs out the authenticated operator", async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(await screen.findByRole("button", { name: "Sign out" }))
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/auth/logout",
+        expect.objectContaining({ method: "POST" }),
+      )
+    })
+    expect(globalThis.location.assign).toHaveBeenCalledWith("/auth/google/login")
+  })
+
+  it("redirects to Google login when the session is no longer valid", async () => {
+    const fallback = vi.mocked(fetch).getMockImplementation()!
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === "/api/auth/me") return jsonResponse({ detail: "Authentication required" }, 401)
+      return fallback(input, init)
+    })
+
+    render(<App />)
+
+    await waitFor(() => {
+      expect(globalThis.location.assign).toHaveBeenCalledWith("/auth/google/login")
+    })
+    expect(screen.getByRole("status")).toHaveTextContent("Loading secure console")
   })
 
   it("retries a finished run from its detail panel", async () => {
@@ -160,6 +200,7 @@ describe("Open ASR console", () => {
     }
     vi.mocked(fetch).mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
+      if (path === "/api/auth/me") return jsonResponse(authenticatedUser)
       if (path === "/api/options") return jsonResponse(options)
       if (path === "/api/runs" && !init?.method) return jsonResponse([assemblyRun])
       if (path === "/api/health") return jsonResponse({ status: "ok", active_runs: 1 })
