@@ -146,6 +146,49 @@ describe("Open ASR console", () => {
     expect((await screen.findAllByText("retry456")).length).toBeGreaterThan(0)
   })
 
+  it("paginates finished runs while keeping active runs visible", async () => {
+    const user = userEvent.setup()
+    const finishedRuns = Array.from({ length: 12 }, (_, index) => ({
+      ...createdRun,
+      id: `history-${String(index + 1).padStart(2, "0")}`,
+      status: "completed" as const,
+      created_at: `2026-07-10T00:${String(12 - index).padStart(2, "0")}:00Z`,
+      finished_at: `2026-07-10T00:${String(13 - index).padStart(2, "0")}:00Z`,
+      summary: { wer_percent: 12.5, rtfx: 20, num_samples: 1 },
+    }))
+    const activeRun = { ...createdRun, id: "active-run", status: "running" as const }
+    const fallback = vi.mocked(fetch).getMockImplementation()!
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === "/api/runs" && !init?.method) return jsonResponse([activeRun, ...finishedRuns])
+      return fallback(input, init)
+    })
+
+    render(<App />)
+
+    expect(await screen.findByText("Showing 1–10 of 12 past runs")).toBeInTheDocument()
+    expect(screen.getByText("Page 1 of 2")).toBeInTheDocument()
+    expect(screen.getByText("active-run")).toBeInTheDocument()
+    expect(screen.getByText("history-01")).toBeInTheDocument()
+    expect(screen.getByText("history-10")).toBeInTheDocument()
+    expect(screen.queryByText("history-11")).not.toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Previous" })).toBeDisabled()
+    expect(screen.getByRole("button", { name: "Next" })).toBeEnabled()
+
+    await user.click(screen.getByRole("button", { name: "Next" }))
+
+    expect(screen.getByText("Showing 11–12 of 12 past runs")).toBeInTheDocument()
+    expect(screen.getByText("Page 2 of 2")).toBeInTheDocument()
+    expect(screen.getByText("active-run")).toBeInTheDocument()
+    expect(screen.queryByText("history-10")).not.toBeInTheDocument()
+    expect(screen.getByText("history-11")).toBeInTheDocument()
+    expect(screen.getByText("history-12")).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Previous" })).toBeEnabled()
+    expect(screen.getByRole("button", { name: "Next" })).toBeDisabled()
+
+    await user.click(screen.getByRole("button", { name: "Previous" }))
+    expect(screen.getByText("Page 1 of 2")).toBeInTheDocument()
+  })
+
   it("shows the stable Assembly alias and live provider model", async () => {
     const assemblyRun = {
       ...createdRun,
