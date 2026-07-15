@@ -31,6 +31,7 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { Switch } from "@/components/ui/switch"
 
 const ACTIVE_STATES = new Set(["queued", "running", "cancelling"])
+const HISTORY_PAGE_SIZE = 10
 
 const DEFAULT_CONFIG: RunConfig = {
   dataset_source: "huggingface",
@@ -230,17 +231,18 @@ function RunComposer({ options, activeCount, onCreated }: { options: Options; ac
 
   return (
     <form className="composer-card" onSubmit={submit}>
-      <div className="composer-heading">
-        <div>
-          <div className="eyebrow"><Zap className="size-3.5" />New evaluation</div>
-          <h1>Configure a run</h1>
+      <div className="composer-scroll">
+        <div className="composer-heading">
+          <div>
+            <div className="eyebrow"><Zap className="size-3.5" />New evaluation</div>
+            <h1>Configure a run</h1>
+          </div>
+          <Badge className="active-count">{activeCount} active</Badge>
         </div>
-        <Badge className="active-count">{activeCount} active</Badge>
-      </div>
 
-      {activeCount > 0 && (
-        <div className="warning-strip"><AlertTriangle className="size-4" /><span>Runs start immediately with no global cap. Check workers and provider usage.</span></div>
-      )}
+        {activeCount > 0 && (
+          <div className="warning-strip"><AlertTriangle className="size-4" /><span>Runs start immediately with no global cap. Check workers and provider usage.</span></div>
+        )}
 
       <div className="form-section">
         <div className="section-label"><Database className="size-4" />Dataset</div>
@@ -323,23 +325,26 @@ function RunComposer({ options, activeCount, onCreated }: { options: Options; ac
         <ToggleRow label="Remote URL mode" description={config.dataset_source === "local" ? "Unavailable for local datasets." : localTransforms ? "Unavailable while streaming, preprocessing, VAD, or a real-time-only model is enabled." : "Let supported providers fetch dataset audio URLs directly."} checked={config.use_url} disabled={localTransforms} onCheckedChange={(checked) => update("use_url", checked)} />
       </div>
 
-      <details className="advanced-panel">
-        <summary><span><Settings2 className="size-4" />Advanced</span><ChevronRight className="size-4 chevron" /></summary>
-        <div className="advanced-content">
-          <div className="form-grid-2">
-            <Field label="Arctan chunk (ms)"><Input type="number" min={1} value={config.arctan_chunk_ms} onChange={(event) => update("arctan_chunk_ms", Number(event.target.value))} /></Field>
-            <Field label="Preprocess batch"><Input type="number" min={1} value={config.audio_preprocessor_batch_size} onChange={(event) => update("audio_preprocessor_batch_size", Number(event.target.value))} /></Field>
+        <details className="advanced-panel">
+          <summary><span><Settings2 className="size-4" />Advanced</span><ChevronRight className="size-4 chevron" /></summary>
+          <div className="advanced-content">
+            <div className="form-grid-2">
+              <Field label="Arctan chunk (ms)"><Input type="number" min={1} value={config.arctan_chunk_ms} onChange={(event) => update("arctan_chunk_ms", Number(event.target.value))} /></Field>
+              <Field label="Preprocess batch"><Input type="number" min={1} value={config.audio_preprocessor_batch_size} onChange={(event) => update("audio_preprocessor_batch_size", Number(event.target.value))} /></Field>
+            </div>
+            <Field label="Prompt"><textarea className="textarea" value={config.prompt ?? ""} onChange={(event) => update("prompt", event.target.value || null)} placeholder="Optional provider instruction" /></Field>
           </div>
-          <Field label="Prompt"><textarea className="textarea" value={config.prompt ?? ""} onChange={(event) => update("prompt", event.target.value || null)} placeholder="Optional provider instruction" /></Field>
-        </div>
-      </details>
+        </details>
+      </div>
 
-      {missingCredential && <div className="credential-error"><KeyRound className="size-4" />{missingPreprocessorCredential ? `${missingPreprocessorCredential} is missing on the server.` : `${provider?.label || "Provider"} credentials are missing on the server.`}</div>}
+      <div className="composer-footer">
+        {missingCredential && <div className="credential-error"><KeyRound className="size-4" />{missingPreprocessorCredential ? `${missingPreprocessorCredential} is missing on the server.` : `${provider?.label || "Provider"} credentials are missing on the server.`}</div>}
 
-      <Button type="submit" className="h-11 w-full" disabled={submitting || datasetsLoading || !selectedDataset || !config.split || missingCredential || unsupportedMode}>
-        {submitting ? <RefreshCw className="size-4 spin" /> : <Play className="size-4 fill-current" />}
-        {submitting ? "Checking dataset…" : "Run evaluation"}
-      </Button>
+        <Button type="submit" className="h-11 w-full" disabled={submitting || datasetsLoading || !selectedDataset || !config.split || missingCredential || unsupportedMode}>
+          {submitting ? <RefreshCw className="size-4 spin" /> : <Play className="size-4 fill-current" />}
+          {submitting ? "Checking dataset…" : "Run evaluation"}
+        </Button>
+      </div>
     </form>
   )
 }
@@ -491,6 +496,7 @@ export default function App() {
   const [selected, setSelected] = useState<Run | null>(null)
   const [detailOpen, setDetailOpen] = useState(false)
   const [dark, setDark] = useState(document.documentElement.classList.contains("dark"))
+  const [historyPage, setHistoryPage] = useState(1)
 
   async function refresh() {
     try {
@@ -523,6 +529,16 @@ export default function App() {
 
   const activeRuns = runs.filter((run) => ACTIVE_STATES.has(run.status))
   const completedRuns = runs.filter((run) => !ACTIVE_STATES.has(run.status))
+  const historyPageCount = Math.max(1, Math.ceil(completedRuns.length / HISTORY_PAGE_SIZE))
+  const historyStartIndex = (historyPage - 1) * HISTORY_PAGE_SIZE
+  const paginatedRuns = completedRuns.slice(historyStartIndex, historyStartIndex + HISTORY_PAGE_SIZE)
+  const visibleRuns = [...activeRuns, ...paginatedRuns]
+  const historyFirst = completedRuns.length ? historyStartIndex + 1 : 0
+  const historyLast = Math.min(historyStartIndex + paginatedRuns.length, completedRuns.length)
+
+  useEffect(() => {
+    setHistoryPage((current) => Math.min(current, historyPageCount))
+  }, [historyPageCount])
 
   return (
     <div className="app-shell">
@@ -553,7 +569,17 @@ export default function App() {
           {activeRuns.length > 0 && <div className="active-strip"><div className="pulse-orb" /><span>{activeRuns.length} evaluation{activeRuns.length === 1 ? " is" : "s are"} running in parallel</span><span className="active-models">{activeRuns.map((run) => `${configuredModelLabel(run.config.model_name)}: ${countLabel(observedCounts(run, "actual_models"))}`).join(" · ")}</span></div>}
 
           <div className="runs-heading"><div><h3>Run history</h3><p>Newest first · updates automatically</p></div><Button variant="outline" size="sm" onClick={refresh}><RefreshCw className="size-3.5" />Refresh</Button></div>
-          <RunTable runs={runs} onSelect={(run) => { setSelected(run); setDetailOpen(true) }} />
+          <RunTable runs={visibleRuns} onSelect={(run) => { setSelected(run); setDetailOpen(true) }} />
+          {completedRuns.length > 0 && (
+            <nav className="history-pagination" aria-label="Run history pagination">
+              <span className="history-range">Showing {historyFirst}–{historyLast} of {completedRuns.length} past runs</span>
+              <div className="history-page-controls">
+                <Button variant="outline" size="sm" onClick={() => setHistoryPage((current) => Math.max(1, current - 1))} disabled={historyPage === 1}>Previous</Button>
+                <span className="history-page-status" aria-live="polite">Page {historyPage} of {historyPageCount}</span>
+                <Button variant="outline" size="sm" onClick={() => setHistoryPage((current) => Math.min(historyPageCount, current + 1))} disabled={historyPage === historyPageCount}>Next</Button>
+              </div>
+            </nav>
+          )}
         </section>
       </main>
 
