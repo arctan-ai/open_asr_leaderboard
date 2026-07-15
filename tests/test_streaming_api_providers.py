@@ -1,10 +1,12 @@
 import asyncio
+import base64
 import importlib
 import importlib.util
 import json
 import os
 from pathlib import Path
 import sys
+import tempfile
 import types
 import unittest
 from unittest import mock
@@ -228,12 +230,14 @@ class StreamingProviderTest(unittest.TestCase):
         class FakeProvider:
             def __init__(self):
                 self.streaming_called = False
+                self.language = None
 
             def transcribe(self, *args, **kwargs):
                 raise AssertionError("static transcribe should not be called")
 
             def transcribe_streaming(self, *args, **kwargs):
                 self.streaming_called = True
+                self.language = kwargs.get("language")
                 return "streamed"
 
         provider = FakeProvider()
@@ -245,10 +249,12 @@ class StreamingProviderTest(unittest.TestCase):
                 "/tmp/audio.wav",
                 {"audio": {"array": [], "sampling_rate": 16000}},
                 streaming=True,
+                language="unknown",
             )
 
         self.assertEqual(transcript, "streamed")
         self.assertTrue(provider.streaming_called)
+        self.assertEqual(provider.language, "unknown")
 
     def test_soniox_realtime_model_forces_streaming(self):
         run_eval = load_run_eval("run_eval")
@@ -569,6 +575,144 @@ class StreamingProviderTest(unittest.TestCase):
 
         self.assertEqual(transcript, "hello world foo bar")
         self.assertIn(json.dumps({"type": "close"}), fake_ws.sent)
+
+    def test_sarvam_registration_and_static_request(self):
+        providers = load_providers()
+        from providers import sarvam_provider
+
+        provider, variant = providers.get_provider("sarvam/saaras:v3")
+        self.assertEqual(provider.__class__.__name__, "SarvamProvider")
+        self.assertEqual(variant, "saaras:v3")
+
+        response = mock.Mock(status_code=200, text="ok")
+        response.json.return_value = {"transcript": "hello"}
+        response.raise_for_status.return_value = None
+
+        with tempfile.NamedTemporaryFile(suffix=".wav") as audio_file:
+            audio_file.write(b"RIFF-test-audio")
+            audio_file.flush()
+            with mock.patch.dict(os.environ, {"SARVAM_API_KEY": "key"}):
+                with mock.patch.object(
+                    sarvam_provider,
+                    "_audio_info",
+                    return_value=types.SimpleNamespace(duration=10, samplerate=16000),
+                ):
+                    with mock.patch.object(
+                        sarvam_provider.requests,
+                        "post",
+                        return_value=response,
+                    ) as post:
+                        transcript = provider.transcribe(
+                            variant,
+                            audio_file.name,
+                            {},
+                            language="unknown",
+                        )
+
+        self.assertEqual(transcript, "hello")
+        request = post.call_args.kwargs
+        self.assertEqual(request["headers"]["Api-Subscription-Key"], "key")
+        self.assertEqual(
+            request["data"],
+            {
+                "model": "saaras:v3",
+                "mode": "transcribe",
+                "language_code": "unknown",
+            },
+        )
+        self.assertEqual(request["files"]["file"][2], "audio/wav")
+
+    def test_sarvam_normalizes_english_and_rejects_long_static_audio(self):
+        providers = load_providers()
+        from providers import PermanentError, sarvam_provider
+
+        self.assertEqual(sarvam_provider._language_code("en"), "en-IN")
+        self.assertEqual(sarvam_provider._language_code("ta-IN"), "ta-IN")
+        self.assertEqual(sarvam_provider._language_code("unknown"), "unknown")
+
+        with tempfile.NamedTemporaryFile(suffix=".wav") as audio_file:
+            with mock.patch.dict(os.environ, {"SARVAM_API_KEY": "key"}):
+                with mock.patch.object(
+                    sarvam_provider,
+                    "_audio_info",
+                    return_value=types.SimpleNamespace(duration=30.1, samplerate=16000),
+                ):
+                    with self.assertRaisesRegex(PermanentError, "up to 30 seconds"):
+                        sarvam_provider.SarvamProvider().transcribe(
+                            "saaras:v3", audio_file.name, {}
+                        )
+
+    def test_sarvam_http_client_errors_are_permanent_except_rate_limits(self):
+        load_providers()
+        from providers import PermanentError, sarvam_provider
+
+        client_error = mock.Mock(status_code=422, text="invalid audio")
+        with self.assertRaisesRegex(PermanentError, "422: invalid audio"):
+            sarvam_provider._raise_for_response(client_error)
+
+        rate_limited = mock.Mock(status_code=429, text="slow down")
+        rate_limited.raise_for_status.side_effect = RuntimeError("retry")
+        with self.assertRaisesRegex(RuntimeError, "retry"):
+            sarvam_provider._raise_for_response(rate_limited)
+
+    def test_sarvam_streaming_sends_audio_flush_and_auto_detection(self):
+        load_providers()
+        from providers import sarvam_provider
+
+        fake_ws = FakeWebSocket(
+            [json.dumps({"type": "data", "data": {"transcript": "hello world"}})]
+        )
+        audio = b"wav-bytes"
+        with tempfile.NamedTemporaryFile(suffix=".wav") as audio_file:
+            audio_file.write(audio)
+            audio_file.flush()
+            with mock.patch.object(
+                sarvam_provider, "connect_websocket", return_value=fake_ws
+            ) as connect:
+                transcript = asyncio.run(
+                    sarvam_provider._transcribe_streaming(
+                        audio_file.name,
+                        "key",
+                        "saaras:v3",
+                        "unknown",
+                    )
+                )
+
+        self.assertEqual(transcript, "hello world")
+        url = connect.call_args.args[0]
+        self.assertIn("language-code=unknown", url)
+        self.assertEqual(
+            connect.call_args.kwargs["headers"], {"Api-Subscription-Key": "key"}
+        )
+        audio_message = json.loads(fake_ws.sent[0])
+        self.assertEqual(
+            base64.b64decode(audio_message["audio"]["data"]), audio
+        )
+        self.assertEqual(audio_message["audio"]["encoding"], "audio/wav")
+        self.assertEqual(fake_ws.sent[-1], json.dumps({"type": "flush"}))
+
+    def test_sarvam_streaming_error_is_permanent(self):
+        load_providers()
+        from providers import PermanentError, sarvam_provider
+
+        fake_ws = FakeWebSocket(
+            [json.dumps({"type": "error", "data": {"error": "bad audio"}})]
+        )
+        with tempfile.NamedTemporaryFile(suffix=".wav") as audio_file:
+            audio_file.write(b"audio")
+            audio_file.flush()
+            with mock.patch.object(
+                sarvam_provider, "connect_websocket", return_value=fake_ws
+            ):
+                with self.assertRaisesRegex(PermanentError, "bad audio"):
+                    asyncio.run(
+                        sarvam_provider._transcribe_streaming(
+                            audio_file.name,
+                            "key",
+                            "saaras:v3",
+                            "en",
+                        )
+                    )
 
     def test_microsoft_streams_pcm16_and_collects_final_results(self):
         providers = load_providers()

@@ -124,6 +124,7 @@ def transcribe_dataset(
     dataset,
     split,
     model_name,
+    language="en",
     use_url=False,
     streaming=False,
     max_samples=None,
@@ -162,7 +163,7 @@ def transcribe_dataset(
     }
 
     mode = "streaming" if effective_streaming else "static"
-    print(f"Transcribing with model: {model_name} ({mode})")
+    print(f"Transcribing with model: {model_name}, language: {language} ({mode})")
 
     def process_sample(sample):
         if use_url:
@@ -176,6 +177,7 @@ def transcribe_dataset(
                     sample,
                     use_url=True,
                     streaming=effective_streaming,
+                    language=language,
                     prompt=prompt,
                 )
             except Exception as e:
@@ -204,6 +206,7 @@ def transcribe_dataset(
                     sample,
                     use_url=False,
                     streaming=effective_streaming,
+                    language=language,
                     prompt=prompt,
                 )
             except Exception as e:
@@ -279,6 +282,7 @@ def transcribe_dataset(
         "dataset_path": dataset_path,
         "dataset": dataset,
         "split": split,
+        "language": language,
         "audio_preprocessor": getattr(args, "audio_preprocessor", "none"),
         "vad_position": getattr(args, "vad_position", "none"),
         "streaming": effective_streaming,
@@ -303,6 +307,11 @@ if __name__ == "__main__":
     parser.add_argument("--dataset_path", required=True)
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--split", default="test")
+    parser.add_argument(
+        "--language",
+        default="en",
+        help="Language code passed to the provider; use 'unknown' for Sarvam auto-detection",
+    )
     parser.add_argument(
         "--model_name",
         required=True,
@@ -361,6 +370,7 @@ if __name__ == "__main__":
             dataset=args.dataset,
             split=args.split,
             model_name=args.model_name,
+            language=args.language,
             use_url=args.use_url,
             streaming=effective_streaming,
             max_samples=args.max_samples,
@@ -381,6 +391,7 @@ if __name__ == "__main__":
                     "dataset_path": args.dataset_path,
                     "dataset": args.dataset,
                     "split": args.split,
+                    "language": args.language,
                     "audio_preprocessor": args.audio_preprocessor,
                     "vad_position": args.vad_position,
                     "streaming": effective_streaming,

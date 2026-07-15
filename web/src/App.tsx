@@ -31,11 +31,25 @@ import { Switch } from "@/components/ui/switch"
 
 const ACTIVE_STATES = new Set(["queued", "running", "cancelling"])
 
+const LANGUAGE_OPTIONS = [
+  ["en", "English (en-IN)"],
+  ["unknown", "Automatic detection"],
+  ["hi-IN", "Hindi"], ["as-IN", "Assamese"], ["bn-IN", "Bengali"],
+  ["ur-IN", "Urdu"], ["kn-IN", "Kannada"], ["ne-IN", "Nepali"],
+  ["ml-IN", "Malayalam"], ["kok-IN", "Konkani"], ["mr-IN", "Marathi"],
+  ["ks-IN", "Kashmiri"], ["od-IN", "Odia"], ["sd-IN", "Sindhi"],
+  ["pa-IN", "Punjabi"], ["sa-IN", "Sanskrit"], ["ta-IN", "Tamil"],
+  ["sat-IN", "Santali"], ["te-IN", "Telugu"], ["mni-IN", "Manipuri"],
+  ["brx-IN", "Bodo"], ["gu-IN", "Gujarati"], ["mai-IN", "Maithili"],
+  ["doi-IN", "Dogri"],
+] as const
+
 const DEFAULT_CONFIG: RunConfig = {
   dataset_path: "bettercallaaryan/nc_agent_clips_openasr",
   dataset: "default",
   split: "test",
   model_name: "deepgram/nova-3",
+  language: "en",
   max_samples: null,
   max_workers: 4,
   use_url: false,
@@ -98,8 +112,10 @@ function RunComposer({ options, activeCount, onCreated }: { options: Options; ac
 
   const modelOptions = useMemo(() => options.providers.flatMap((provider) => provider.models.map((model) => ({ value: `${provider.prefix}/${model}`, label: `${provider.label} · ${model}`, configured: provider.configured }))), [options])
   const provider = options.providers.find((item) => config.model_name.startsWith(`${item.prefix}/`))
+  const isSarvam = config.model_name.startsWith("sarvam/")
   const forcedStreaming = config.model_name === "soniox/stt-rt-v5"
-  const localTransforms = config.streaming || forcedStreaming || config.audio_preprocessor !== "none" || config.vad_position !== "none"
+  const providerRequiresLocal = isSarvam
+  const localTransforms = config.streaming || forcedStreaming || providerRequiresLocal || config.audio_preprocessor !== "none" || config.vad_position !== "none"
   const preprocessorCredentials: Record<string, string[]> = {
     arctan: ["ARCTAN_SDK_KEY"],
     ai_coustics_vfl_2_1: ["LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"],
@@ -181,10 +197,20 @@ function RunComposer({ options, activeCount, onCreated }: { options: Options; ac
       <div className="form-section">
         <div className="section-label"><Activity className="size-4" />Recognition</div>
         <Field label="Provider and model">
-          <Select value={config.model_name} onValueChange={(value) => { update("model_name", value); if (value === "soniox/stt-rt-v5") update("use_url", false) }}>
+          <Select value={config.model_name} onValueChange={(value) => { update("model_name", value); if (value === "soniox/stt-rt-v5" || value.startsWith("sarvam/")) update("use_url", false) }}>
             <SelectTrigger><SelectValue /></SelectTrigger>
             <SelectContent>{modelOptions.map((item) => <SelectItem value={item.value} key={item.value}>{item.label}{item.configured ? "" : " · missing key"}</SelectItem>)}</SelectContent>
           </Select>
+        </Field>
+        <Field label="Language" hint={isSarvam ? (config.language === "unknown" ? "Sarvam detects the spoken language" : "Known language improves Sarvam accuracy") : "Provider language code"}>
+          {isSarvam ? (
+            <Select value={config.language} onValueChange={(value) => update("language", value)}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>{LANGUAGE_OPTIONS.map(([value, label]) => <SelectItem value={value} key={value}>{label}</SelectItem>)}</SelectContent>
+            </Select>
+          ) : (
+            <Input value={config.language} onChange={(event) => update("language", event.target.value)} />
+          )}
         </Field>
         <div className="form-grid-2">
           <Field label="Workers" hint="Per-run concurrency"><Input type="number" min={1} max={300} value={config.max_workers} onChange={(event) => update("max_workers", Number(event.target.value))} /></Field>
@@ -324,6 +350,7 @@ function RunDetail({ selected, open, onOpenChange, onUpdated }: { selected: Run 
                 <div><dt>Pipeline</dt><dd>{pipelineLabel(run)}</dd></div>
                 <div><dt>Workers</dt><dd>{run.config.max_workers}</dd></div>
                 <div><dt>Mode</dt><dd>{run.config.streaming ? "Streaming" : "Static"}</dd></div>
+                <div><dt>Language</dt><dd>{run.config.language}</dd></div>
                 <div><dt>Samples</dt><dd>{run.config.max_samples ?? "Full split"}</dd></div>
               </dl>
             </section>

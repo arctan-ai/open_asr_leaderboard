@@ -18,6 +18,7 @@ export type RunConfig = {
   dataset: string
   split: string
   model_name: string
+  language: string
   max_samples: number | null
   max_workers: number
   use_url: boolean

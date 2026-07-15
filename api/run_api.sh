@@ -14,6 +14,7 @@ export ZOOM_API_KEY="your_api_key"
 export OPENAI_API_KEY="your_api_key"
 export SONIOX_API_KEY="your_api_key"
 export DEEPGRAM_API_KEY="your_api_key"
+export SARVAM_API_KEY="your_api_key"
 
 export HF_TOKEN="your_api_key"
 RESULTS_BUCKET="${RESULTS_BUCKET:-}"
@@ -25,6 +26,9 @@ RESULTS_BUCKET="${RESULTS_BUCKET:-}"
 # python run_eval.py --dataset_path="$DATASET_PATH" --dataset=ami --split=test --model_name deepgram/nova-3 --max_workers=16 --streaming
 # python run_eval.py --dataset_path="$DATASET_PATH" --dataset=ami --split=test --model_name soniox/stt-async-v5 --max_workers=16 --streaming
 # python run_eval.py --dataset_path="$DATASET_PATH" --dataset=ami --split=test --model_name assembly/universal-3-pro --max_workers=4 --streaming
+# python run_eval.py --dataset_path="$DATASET_PATH" --dataset=ami --split=test --model_name sarvam/saaras:v3 --language en-IN --max_workers=4
+# python run_eval.py --dataset_path="$DATASET_PATH" --dataset=ami --split=test --model_name sarvam/saaras:v3 --language en-IN --max_workers=4 --streaming
+# python run_eval.py --dataset_path="$DATASET_PATH" --dataset=ami --split=test --model_name sarvam/saaras:v3 --language unknown --max_workers=4 --streaming
 MODEL_CONFIGS=(
     # "openai/gpt-4o-transcribe      false  16"
     # "openai/gpt-4o-mini-transcribe false  16"
@@ -39,6 +43,7 @@ MODEL_CONFIGS=(
     # "smallestai/pulse              false  16"
     # "soniox/stt-async-v5           false  16"
     # "deepgram/nova-3               false  16"
+    # "sarvam/saaras:v3             false  4"
     # "reson8/resonant-1             false  16"
     # "reson8/resonant-1-flash       false  16"
     # "microsoft/azure-speech-05-2026  false  4"

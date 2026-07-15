@@ -47,6 +47,11 @@ PROVIDERS = {
         "models": ["azure-speech-05-2026", "MAI-Transcribe-1.5"],
         "credentials": ["AZURE_API_KEY"],
     },
+    "sarvam": {
+        "label": "Sarvam",
+        "models": ["saaras:v3"],
+        "credentials": ["SARVAM_API_KEY"],
+    },
     "smallestai": {
         "label": "Smallest AI",
         "models": ["pulse"],
@@ -88,6 +93,7 @@ class RunCreate(BaseModel):
     dataset: str = Field(default="default", min_length=1, max_length=200)
     split: str = Field(default="test", min_length=1, max_length=200)
     model_name: str = Field(default="deepgram/nova-3", min_length=3, max_length=200)
+    language: str = Field(default="en", min_length=2, max_length=32)
     max_samples: int | None = Field(default=None, ge=1)
     max_workers: int = Field(default=4, ge=1, le=300)
     use_url: bool = False
@@ -123,6 +129,8 @@ class RunCreate(BaseModel):
         forced_streaming = self.model_name == "soniox/stt-rt-v5"
         if self.use_url and (self.streaming or forced_streaming):
             raise ValueError("URL mode cannot be combined with streaming")
+        if self.use_url and prefix == "sarvam":
+            raise ValueError("Sarvam requires local audio; URL mode is not supported")
         if self.use_url and self.audio_preprocessor != "none":
             raise ValueError("URL mode cannot be combined with audio preprocessing")
         if self.use_url and self.vad_position != "none":
@@ -296,6 +304,8 @@ class RunManager:
             request.split,
             "--model_name",
             request.model_name,
+            "--language",
+            request.language,
             "--max_workers",
             str(request.max_workers),
             "--output_dir",
