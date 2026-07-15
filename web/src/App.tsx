@@ -10,6 +10,7 @@ import {
   Download,
   Gauge,
   KeyRound,
+  LogOut,
   Moon,
   Play,
   RefreshCw,
@@ -21,7 +22,7 @@ import {
   Zap,
 } from "lucide-react"
 import { toast } from "sonner"
-import { ApiError, api, type DatasetOption, type Options, type Run, type RunConfig } from "./api"
+import { ApiError, api, type AuthUser, type DatasetOption, type Options, type Run, type RunConfig } from "./api"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -490,6 +491,8 @@ function RunDetail({ selected, open, onOpenChange, onUpdated, onRetried }: { sel
 }
 
 export default function App() {
+  const [user, setUser] = useState<AuthUser | null>(null)
+  const [authReady, setAuthReady] = useState(false)
   const [options, setOptions] = useState<Options | null>(null)
   const [runs, setRuns] = useState<Run[]>([])
   const [healthy, setHealthy] = useState(false)
@@ -510,10 +513,32 @@ export default function App() {
   }
 
   useEffect(() => {
-    refresh()
-    const timer = window.setInterval(refresh, 2500)
-    return () => window.clearInterval(timer)
+    let timer: number | undefined
+    let cancelled = false
+    async function bootstrap() {
+      try {
+        const authenticatedUser = await api.me()
+        if (cancelled) return
+        setUser(authenticatedUser)
+        await refresh()
+        if (!cancelled) timer = window.setInterval(refresh, 2500)
+      } catch {
+        if (!cancelled) setHealthy(false)
+      } finally {
+        if (!cancelled) setAuthReady(true)
+      }
+    }
+    void bootstrap()
+    return () => {
+      cancelled = true
+      if (timer !== undefined) window.clearInterval(timer)
+    }
   }, [])
+
+  async function logout() {
+    await api.logout()
+    globalThis.location.assign("/auth/google/login")
+  }
 
   function updateRun(updated: Run) {
     setRuns((current) => current.map((run) => run.id === updated.id ? updated : run))
@@ -540,6 +565,10 @@ export default function App() {
     setHistoryPage((current) => Math.min(current, historyPageCount))
   }, [historyPageCount])
 
+  if (!authReady || !user) {
+    return <div className="auth-loading" role="status">Loading secure console…</div>
+  }
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -554,6 +583,8 @@ export default function App() {
               <div className="credential-list">{Object.entries(options.credentials).map(([name, configured]) => <div key={name}><span>{name}</span><Badge className={configured ? "credential-ok" : "credential-missing"}>{configured ? "Ready" : "Missing"}</Badge></div>)}</div>
             </PopoverContent>
           </Popover>}
+          <span className="user-email" title={user.name}>{user.email}</span>
+          <Button variant="ghost" size="icon" onClick={logout} aria-label="Sign out"><LogOut className="size-4" /></Button>
           <Button variant="ghost" size="icon" onClick={toggleTheme} aria-label={dark ? "Use light theme" : "Use dark theme"}>{dark ? <Sun className="size-4" /> : <Moon className="size-4" />}</Button>
         </div>
       </header>

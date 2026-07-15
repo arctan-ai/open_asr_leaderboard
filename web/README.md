@@ -10,8 +10,42 @@ The React application is served by Vite during development. In production, FastA
 - Node.js 20 or newer and npm
 - Provider and preprocessor credentials in the repository `.env`
 - Hugging Face access through `HF_TOKEN` when the selected dataset is private
+- An internal Google OAuth web client for the `arctan.ai` Workspace
+- A public HTTPS origin that proxies to the console
 
 The browser never receives credential values. `/api/options` exposes only whether each required credential is configured or missing.
+
+## Google Workspace authentication
+
+The console fails closed unless Google authentication is configured. In the
+[Google Auth Platform](https://console.cloud.google.com/auth/overview), create a
+Web application OAuth client with an **Internal** audience and register this
+exact authorized redirect URI:
+
+```text
+https://<console-host>/auth/google/callback
+```
+
+Configure the corresponding values in the repository `.env`:
+
+```bash
+GOOGLE_OAUTH_CLIENT_ID=...
+GOOGLE_OAUTH_CLIENT_SECRET=...
+OPEN_ASR_SESSION_SECRET=...
+OPEN_ASR_PUBLIC_URL=https://<console-host>
+OPEN_ASR_GOOGLE_DOMAIN=arctan.ai
+```
+
+Generate the session secret with:
+
+```bash
+python -c 'import secrets; print(secrets.token_urlsafe(48))'
+```
+
+`OPEN_ASR_PUBLIC_URL` must be the externally visible HTTPS origin, without a
+trailing slash. The callback URI is derived from it and must match Google Cloud
+exactly. The server validates the signed Google `hd` claim; an email address
+ending in `@arctan.ai` is not sufficient by itself.
 
 ## Local setup
 
@@ -39,7 +73,10 @@ Start Vite in another terminal:
 npm --prefix web run dev
 ```
 
-Open `http://127.0.0.1:5173`. Vite proxies `/api` requests to the backend on `127.0.0.1:8000`.
+Vite proxies `/api` and `/auth` requests to the backend on `127.0.0.1:8000`.
+Because authentication cookies are Secure, access development through the HTTPS
+origin configured in `OPEN_ASR_PUBLIC_URL`, with its reverse proxy targeting the
+Vite server. Opening the plain HTTP Vite URL will not establish a session.
 
 ## Using the console
 
@@ -137,16 +174,19 @@ If the health check fails, inspect the current startup logs with:
 sudo journalctl -u open-asr-console.service -n 100 --no-pager
 ```
 
-Access it from your machine through an SSH tunnel:
-
-```bash
-ssh -L 8080:127.0.0.1:8080 livekit-server
-```
-
-Then open `http://127.0.0.1:8080`.
+Keep Uvicorn bound to `127.0.0.1:8080`. Configure the external HTTPS reverse
+proxy and DNS separately so `OPEN_ASR_PUBLIC_URL` forwards to that listener.
+The proxy must preserve normal `Host` and forwarding headers and must not cache
+`/auth`, `/api`, or SSE responses. Open the configured public HTTPS URL; direct
+HTTP or SSH-tunnel access cannot use the Secure authentication cookie.
 
 After a deployment, hard-refresh the page (`Ctrl+Shift+R` on Linux/Windows or
 `Cmd+Shift+R` on macOS) so the browser loads the new hashed JavaScript and CSS
 assets.
 
-Do not bind the service publicly for this MVP. It does not include public authentication or TLS termination.
+Do not bind Uvicorn publicly. Google OAuth protects the application, while TLS
+termination and public ingress remain the responsibility of the reverse proxy.
+
+The anonymous `GET /healthz` endpoint reports liveness without run counts. All
+console state, including `GET /api/health`, requires an authenticated Arctan
+session.

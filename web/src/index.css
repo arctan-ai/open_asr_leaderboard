@@ -85,6 +85,8 @@ button:disabled { cursor: not-allowed; }
 .brand strong { font-size: 14px; letter-spacing: -.01em; }
 .brand span { margin-top: 1px; color: var(--muted-foreground); font-size: 11px; }
 .topbar-actions { display: flex; align-items: center; gap: 4px; }
+.user-email { max-width: 220px; overflow: hidden; padding: 0 6px; color: var(--muted-foreground); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.auth-loading { display: grid; min-height: 100vh; place-items: center; color: var(--muted-foreground); font-size: 13px; }
 .health-pill { display: inline-flex; align-items: center; gap: 7px; margin-right: 8px; border: 1px solid var(--border); border-radius: 999px; padding: 5px 9px; color: var(--muted-foreground); font-size: 11px; font-weight: 600; }
 .health-pill > span { size: 6px; border-radius: 999px; background: #ef4444; }
 .health-pill.healthy > span { background: #34c759; box-shadow: 0 0 0 3px rgba(52,199,89,.12); }

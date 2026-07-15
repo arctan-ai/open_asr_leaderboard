@@ -4,7 +4,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 service_name="open-asr-console.service"
-health_url="http://127.0.0.1:8080/api/health"
+health_url="http://127.0.0.1:8080/healthz"
 
 command -v node >/dev/null || {
   echo "Node.js is required but was not found in PATH." >&2

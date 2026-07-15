@@ -131,13 +131,13 @@ the resulting `web/dist` directory. On the production server, run
 `./sync_console.sh` after pulling changes to install locked frontend dependencies,
 build the assets, and restart the console service.
 
-Production on `livekit-server` serves the built Vite app and API from the same localhost-only process. After installing `deploy/open-asr-console.service`, connect with:
-
-```bash
-ssh -L 8080:127.0.0.1:8080 livekit-server
-```
-
-Then open `http://127.0.0.1:8080`. Credentials remain in the server `.env`; the browser only receives configured/missing status.
+Production on `livekit-server` serves the built Vite app and API from the same
+localhost-only process. A separately managed HTTPS reverse proxy exposes the
+console. Access requires a verified Google Workspace identity with a signed
+`hd=arctan.ai` claim; provider credentials remain in the server `.env`, and the
+browser receives only configured/missing status. See the
+[console guide](web/README.md#google-workspace-authentication) for OAuth client,
+callback, environment, and ingress setup.
 
 # Trade-off plots
 
