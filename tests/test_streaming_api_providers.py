@@ -190,6 +190,7 @@ def load_run_eval(module_name):
     normalizer_stub.__path__ = [str(REPO_ROOT / "normalizer")]
     data_utils_stub = types.ModuleType("normalizer.data_utils")
     data_utils_stub.prepare_data = lambda ds, args=None: ds
+    data_utils_stub.normalizer = lambda text: text.strip(" .")
     data_utils_stub.add_audio_preprocessor_args = lambda parser: None
     data_utils_stub.is_target_text_in_range = lambda text: True
     data_utils_stub.ml_normalizer = lambda text, lang=None: text
@@ -224,6 +225,103 @@ def load_run_eval(module_name):
 
 
 class StreamingProviderTest(unittest.TestCase):
+    def test_rate_limit_classifier_handles_http_websocket_and_nested_errors(self):
+        providers = load_providers()
+
+        http_error = RuntimeError("request failed")
+        http_error.response = types.SimpleNamespace(status_code=429)
+        self.assertTrue(providers.is_rate_limit_error(http_error))
+
+        websocket_error = RuntimeError(
+            "received 1003 (unsupported data) Rate limit exceeded. "
+            "Visit the API Dashboard to review and manage your subscription."
+        )
+        self.assertTrue(providers.is_rate_limit_error(websocket_error))
+
+        try:
+            try:
+                raise RuntimeError("quota exhausted")
+            except RuntimeError as cause:
+                raise RuntimeError("provider failed") from cause
+        except RuntimeError as nested_error:
+            self.assertTrue(providers.is_rate_limit_error(nested_error))
+
+        self.assertFalse(providers.is_rate_limit_error(TimeoutError("timed out")))
+
+    def test_rate_limit_is_not_retried_in_both_runners(self):
+        for module_name in ("run_eval", "run_eval_ml"):
+            with self.subTest(module_name=module_name):
+                runner = load_run_eval(module_name)
+                provider = mock.Mock()
+                provider.force_streaming_for_model.return_value = False
+                provider.transcribe.side_effect = RuntimeError("Rate limit exceeded")
+                stop_event = mock.Mock()
+                stop_event.is_set.return_value = False
+
+                with mock.patch.object(
+                    runner, "get_provider", return_value=(provider, "model")
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "Rate limit exceeded"):
+                        runner.transcribe_with_retry(
+                            "vendor/model",
+                            None,
+                            {},
+                            use_url=True,
+                            stop_event=stop_event,
+                        )
+
+                provider.transcribe.assert_called_once()
+                stop_event.set.assert_called_once()
+
+    def test_transient_error_keeps_retrying(self):
+        run_eval = load_run_eval("run_eval")
+        provider = mock.Mock()
+        provider.force_streaming_for_model.return_value = False
+        provider.transcribe.side_effect = [TimeoutError("temporary"), "ok"]
+
+        with mock.patch.object(
+            run_eval, "get_provider", return_value=(provider, "model")
+        ), mock.patch.object(run_eval.time, "sleep"):
+            result = run_eval.transcribe_with_retry(
+                "vendor/model", None, {}, use_url=True
+            )
+
+        self.assertEqual(result.text, "ok")
+        self.assertEqual(result.actual_model, "vendor/model")
+        self.assertEqual(provider.transcribe.call_count, 2)
+
+    def test_empty_transcript_fails_eval_instead_of_publishing_wer(self):
+        run_eval = load_run_eval("run_eval")
+        from providers import PermanentError, ProviderTranscription
+
+        sample = {
+            "original_text": "hello",
+            "audio": {"array": [0] * 3200, "sampling_rate": 16000},
+        }
+        args = types.SimpleNamespace(audio_preprocessor="none", vad_position="none")
+        with tempfile.TemporaryDirectory() as output_dir, mock.patch.object(
+            run_eval, "load_evaluation_dataset", return_value=[sample]
+        ), mock.patch.object(
+            run_eval,
+            "transcribe_with_retry",
+            return_value=ProviderTranscription(
+                text=".", actual_model="assembly/universal-3-5-pro"
+            ),
+        ):
+            with self.assertRaisesRegex(PermanentError, "Sample 0.*empty transcript"):
+                run_eval.transcribe_dataset(
+                    "dataset/path",
+                    "default",
+                    "test",
+                    "assembly/universal-stt",
+                    language="unknown",
+                    max_workers=1,
+                    args=args,
+                    output_dir=output_dir,
+                )
+
+            self.assertFalse(list(Path(output_dir).glob("*.jsonl")))
+
     def test_streaming_routes_to_provider_streaming_method(self):
         run_eval = load_run_eval("run_eval")
 
@@ -252,7 +350,7 @@ class StreamingProviderTest(unittest.TestCase):
                 language="unknown",
             )
 
-        self.assertEqual(transcript, "streamed")
+        self.assertEqual(transcript.text, "streamed")
         self.assertTrue(provider.streaming_called)
         self.assertEqual(provider.language, "unknown")
 
@@ -284,7 +382,7 @@ class StreamingProviderTest(unittest.TestCase):
                 streaming=False,
             )
 
-        self.assertEqual(transcript, "streamed")
+        self.assertEqual(transcript.text, "streamed")
         self.assertTrue(provider.streaming_called)
 
     def test_soniox_async_model_keeps_static_mode(self):
@@ -315,7 +413,7 @@ class StreamingProviderTest(unittest.TestCase):
                 streaming=False,
             )
 
-        self.assertEqual(transcript, "static")
+        self.assertEqual(transcript.text, "static")
         self.assertTrue(provider.static_called)
 
     def test_forced_streaming_rejects_url_audio(self):
@@ -454,9 +552,9 @@ class StreamingProviderTest(unittest.TestCase):
                 {
                     "tokens": [
                         {"text": "hel", "is_final": False},
-                        {"text": "hello", "is_final": True},
+                        {"text": "hello", "is_final": True, "language": "en"},
                         {"text": " ", "is_final": True},
-                        {"text": "world", "is_final": True},
+                        {"text": "world", "is_final": True, "language": "en"},
                         {"text": "<end>", "is_final": True},
                     ],
                     "finished": True,
@@ -478,7 +576,9 @@ class StreamingProviderTest(unittest.TestCase):
                     )
                 )
 
-        self.assertEqual(transcript, "hello world")
+        self.assertEqual(transcript.text, "hello world")
+        self.assertEqual(transcript.actual_model, "soniox/stt-rt-v5")
+        self.assertEqual(transcript.detected_languages, ("en",))
 
     def test_soniox_streaming_model_typo_fails_with_hint(self):
         load_providers()
@@ -501,7 +601,12 @@ class StreamingProviderTest(unittest.TestCase):
         from providers import assemblyai_provider
 
         messages = [
-            json.dumps({"type": "Begin"}),
+            json.dumps(
+                {
+                    "type": "Begin",
+                    "configuration": {"model": "universal-3-5-pro"},
+                }
+            ),
             json.dumps(
                 {
                     "type": "Turn",
@@ -514,6 +619,7 @@ class StreamingProviderTest(unittest.TestCase):
                     "type": "Turn",
                     "end_of_turn": True,
                     "transcript": "hello",
+                    "language_code": "en",
                 }
             ),
             json.dumps(
@@ -532,7 +638,7 @@ class StreamingProviderTest(unittest.TestCase):
         ):
             with mock.patch.object(
                 assemblyai_provider, "connect_websocket", return_value=fake_ws
-            ):
+            ) as connect:
                 transcript = asyncio.run(
                     assemblyai_provider._transcribe_streaming(
                         "/tmp/audio.wav",
@@ -541,10 +647,85 @@ class StreamingProviderTest(unittest.TestCase):
                     )
                 )
 
-        self.assertEqual(transcript, "hello world")
+        self.assertEqual(transcript.text, "hello world")
+        self.assertEqual(transcript.actual_model, "assembly/universal-3-5-pro")
+        self.assertEqual(transcript.detected_languages, ("en",))
+        self.assertIn("language_detection=true", connect.call_args.args[0])
         self.assertIn(json.dumps({"type": "Terminate"}), fake_ws.sent)
         self.assertTrue(fake_ws.closed)
 
+    def test_assembly_streaming_surfaces_provider_error(self):
+        load_providers()
+        from providers import PermanentError, assemblyai_provider
+
+        fake_ws = FakeWebSocket(
+            [
+                json.dumps(
+                    {
+                        "type": "Error",
+                        "error_code": 3007,
+                        "error": "Audio transmission rate exceeded",
+                    }
+                )
+            ]
+        )
+        with mock.patch.object(
+            assemblyai_provider, "pcm16_chunks", return_value=[b"a"]
+        ), mock.patch.object(
+            assemblyai_provider, "connect_websocket", return_value=fake_ws
+        ):
+            with self.assertRaisesRegex(PermanentError, "3007.*rate exceeded"):
+                asyncio.run(
+                    assemblyai_provider._transcribe_streaming(
+                        "/tmp/audio.wav", "key", "universal-3-5-pro"
+                    )
+                )
+
+    def test_assembly_alias_uses_documented_fallback_and_reports_model(self):
+        load_providers()
+        import assemblyai as aai
+        from providers import assemblyai_provider
+
+        transcript = types.SimpleNamespace(
+            status="completed",
+            text="namaste",
+            language_code="hi",
+            json_response={
+                "speech_model_used": "universal-3-5-pro",
+                "language_code": "hi",
+            },
+        )
+        transcriber = mock.Mock()
+        transcriber.transcribe.return_value = transcript
+        config = object()
+        with mock.patch.object(aai, "Transcriber", return_value=transcriber), mock.patch.object(
+            aai, "TranscriptionConfig", return_value=config
+        ) as transcription_config:
+            result = assemblyai_provider.AssemblyAIProvider().transcribe(
+                "universal-stt",
+                "/tmp/audio.wav",
+                {"audio": {"array": [0] * 3000, "sampling_rate": 16000}},
+                language="unknown",
+            )
+            assemblyai_provider.AssemblyAIProvider().transcribe(
+                "universal-3-pro",
+                "/tmp/audio.wav",
+                {"audio": {"array": [0] * 3000, "sampling_rate": 16000}},
+                language="unknown",
+            )
+
+        self.assertEqual(transcription_config.call_count, 2)
+        for call in transcription_config.call_args_list:
+            self.assertEqual(
+                call.kwargs,
+                {
+                    "speech_models": ["universal-3-5-pro", "universal-2"],
+                    "language_detection": True,
+                },
+            )
+        self.assertEqual(result.text, "namaste")
+        self.assertEqual(result.actual_model, "assembly/universal-3-5-pro")
+        self.assertEqual(result.detected_languages, ("hi",))
 
     def test_cartesia_collects_turn_end_transcripts(self):
         load_providers()
@@ -613,7 +794,11 @@ class StreamingProviderTest(unittest.TestCase):
         )
         self.assertEqual(
             session.post.call_args.kwargs["json"],
-            {"model": "stt-async-v5", "file_id": "file-id"},
+            {
+                "model": "stt-async-v5",
+                "file_id": "file-id",
+                "enable_language_identification": True,
+            },
         )
 
     def test_sarvam_registration_and_static_request(self):
@@ -625,7 +810,7 @@ class StreamingProviderTest(unittest.TestCase):
         self.assertEqual(variant, "saaras:v3")
 
         response = mock.Mock(status_code=200, text="ok")
-        response.json.return_value = {"transcript": "hello"}
+        response.json.return_value = {"transcript": "hello", "language_code": "hi-IN"}
         response.raise_for_status.return_value = None
 
         with tempfile.NamedTemporaryFile(suffix=".wav") as audio_file:
@@ -649,7 +834,9 @@ class StreamingProviderTest(unittest.TestCase):
                             language="unknown",
                         )
 
-        self.assertEqual(transcript, "hello")
+        self.assertEqual(transcript.text, "hello")
+        self.assertEqual(transcript.actual_model, "sarvam/saaras:v3")
+        self.assertEqual(transcript.detected_languages, ("hi-IN",))
         request = post.call_args.kwargs
         self.assertEqual(request["headers"]["Api-Subscription-Key"], "key")
         self.assertEqual(
@@ -718,7 +905,8 @@ class StreamingProviderTest(unittest.TestCase):
                     )
                 )
 
-        self.assertEqual(transcript, "hello world")
+        self.assertEqual(transcript.text, "hello world")
+        self.assertEqual(transcript.actual_model, "sarvam/saaras:v3")
         url = connect.call_args.args[0]
         self.assertIn("language-code=unknown", url)
         self.assertEqual(

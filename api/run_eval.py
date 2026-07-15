@@ -1,5 +1,6 @@
 import argparse
 import json
+from collections import Counter
 from typing import Optional
 from pathlib import Path
 import sys
@@ -8,7 +9,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-import datasets
 import evaluate
 import soundfile as sf
 import tempfile
@@ -19,9 +19,16 @@ import itertools
 from tqdm import tqdm
 from dotenv import load_dotenv
 from normalizer import data_utils
+from api.dataset_catalog import load_evaluation_dataset
 import concurrent.futures
+import threading
 from datetime import datetime, timezone
-from providers import get_provider, PermanentError
+from providers import (
+    PermanentError,
+    as_provider_transcription,
+    get_provider,
+    is_rate_limit_error,
+)
 
 load_dotenv()
 
@@ -80,6 +87,7 @@ def transcribe_with_retry(
     streaming=False,
     language="en",
     prompt=None,
+    stop_event=None,
 ):
     provider, variant = get_provider(model_name)
     effective_streaming = streaming or provider.force_streaming_for_model(variant)
@@ -91,16 +99,25 @@ def transcribe_with_retry(
         kwargs["prompt"] = prompt
     retries = 0
     while retries <= max_retries:
+        if stop_event is not None and stop_event.is_set():
+            raise RuntimeError("Transcription cancelled after rate limit failure")
         try:
             transcribe_fn = (
                 provider.transcribe_streaming
                 if effective_streaming
                 else provider.transcribe
             )
-            return transcribe_fn(variant, audio_file_path, sample, **kwargs)
-        except PermanentError:
+            result = transcribe_fn(variant, audio_file_path, sample, **kwargs)
+            return as_provider_transcription(result, fallback_model=model_name)
+        except PermanentError as e:
+            if is_rate_limit_error(e) and stop_event is not None:
+                stop_event.set()
             raise
         except Exception as e:
+            if is_rate_limit_error(e):
+                if stop_event is not None:
+                    stop_event.set()
+                raise
             retries += 1
             if retries > max_retries:
                 raise e
@@ -132,9 +149,12 @@ def transcribe_dataset(
     prompt=None,
     args=None,
     output_dir="./results",
+    dataset_source="huggingface",
 ):
     started_at = datetime.now(timezone.utc).isoformat()
     effective_streaming = effective_streaming_for_model(model_name, streaming)
+    if dataset_source == "local" and use_url:
+        raise ValueError("Local datasets cannot be combined with URL mode")
     if effective_streaming and use_url:
         raise ValueError("--streaming requires local audio; do not use --use_url")
 
@@ -150,7 +170,12 @@ def transcribe_dataset(
             audio_rows = itertools.islice(audio_rows, max_samples)
         ds = audio_rows
     else:
-        ds = datasets.load_dataset(dataset_path, dataset, split=split, streaming=False)
+        ds = load_evaluation_dataset(
+            dataset_source=dataset_source,
+            dataset_path=dataset_path,
+            dataset=dataset,
+            split=split,
+        )
         if max_samples:
             ds = ds.select(range(min(max_samples, len(ds))))
         ds = data_utils.prepare_data(ds, args=args)
@@ -160,29 +185,55 @@ def transcribe_dataset(
         "predictions": [],
         "audio_length_s": [],
         "transcription_time_s": [],
+        "provider_metadata": [],
     }
+    actual_models: Counter[str] = Counter()
+    detected_languages: Counter[str] = Counter()
+    stop_event = threading.Event()
+
+    try:
+        total_samples = len(ds)
+    except TypeError:
+        total_samples = max_samples
+
+    def write_progress() -> None:
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        progress = {
+            "completed_samples": len(results["references"]),
+            "total_samples": total_samples,
+            "actual_models": dict(sorted(actual_models.items())),
+            "detected_languages": dict(sorted(detected_languages.items())),
+        }
+        progress_path = output_path / "progress.json"
+        temporary_path = output_path / "progress.json.tmp"
+        temporary_path.write_text(
+            json.dumps(progress, indent=2) + "\n", encoding="utf-8"
+        )
+        temporary_path.replace(progress_path)
+
+    write_progress()
 
     mode = "streaming" if effective_streaming else "static"
     print(f"Transcribing with model: {model_name}, language: {language} ({mode})")
 
-    def process_sample(sample):
+    def process_sample(sample_index, sample):
+        if stop_event.is_set():
+            return None
         if use_url:
             reference = sample["row"]["text"].strip() or " "
             audio_duration = sample["row"]["audio_length_s"]
             start = time.time()
-            try:
-                transcription = transcribe_with_retry(
-                    model_name,
-                    None,
-                    sample,
-                    use_url=True,
-                    streaming=effective_streaming,
-                    language=language,
-                    prompt=prompt,
-                )
-            except Exception as e:
-                print(f"Failed to transcribe after retries: {e}")
-                transcription = ""
+            transcription = transcribe_with_retry(
+                model_name,
+                None,
+                sample,
+                use_url=True,
+                streaming=effective_streaming,
+                language=language,
+                prompt=prompt,
+                stop_event=stop_event,
+            )
 
         else:
             reference = sample.get("original_text", "").strip() or " "
@@ -208,33 +259,53 @@ def transcribe_dataset(
                     streaming=effective_streaming,
                     language=language,
                     prompt=prompt,
+                    stop_event=stop_event,
                 )
-            except Exception as e:
-                print(f"Failed to transcribe after retries: {e}")
-                transcription = ""
             finally:
                 if os.path.exists(tmp_path):
                     os.unlink(tmp_path)
 
         transcription_time = time.time() - start
+        if reference.strip() and not data_utils.normalizer(transcription.text).strip():
+            raise PermanentError(
+                f"Sample {sample_index} returned an empty transcript for a non-empty "
+                f"reference ({model_name})"
+            )
         return reference, transcription, audio_duration, transcription_time
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_sample = {
-            executor.submit(process_sample, sample): sample for sample in ds
+            executor.submit(process_sample, sample_index, sample): sample_index
+            for sample_index, sample in enumerate(ds)
         }
         for future in tqdm(
             concurrent.futures.as_completed(future_to_sample),
             total=len(future_to_sample),
             desc="Transcribing",
         ):
-            reference, transcription, audio_duration, transcription_time = (
-                future.result()
-            )
-            results["predictions"].append(transcription)
+            try:
+                result = future.result()
+            except Exception:
+                stop_event.set()
+                for pending in future_to_sample:
+                    pending.cancel()
+                raise
+            if result is None:
+                continue
+            reference, transcription, audio_duration, transcription_time = result
+            results["predictions"].append(transcription.text)
             results["references"].append(reference)
             results["audio_length_s"].append(audio_duration)
             results["transcription_time_s"].append(transcription_time)
+            metadata = {
+                "actual_model": transcription.actual_model,
+                "detected_languages": list(transcription.detected_languages),
+            }
+            results["provider_metadata"].append(metadata)
+            if transcription.actual_model:
+                actual_models[transcription.actual_model] += 1
+            detected_languages.update(transcription.detected_languages)
+            write_progress()
 
     manifest_path = data_utils.write_manifest(
         results["references"],
@@ -245,6 +316,7 @@ def transcribe_dataset(
         split,
         audio_length=results["audio_length_s"],
         transcription_time=results["transcription_time_s"],
+        provider_metadata=results["provider_metadata"],
         basedir=output_dir,
     )
 
@@ -279,6 +351,7 @@ def transcribe_dataset(
         "started_at": started_at,
         "finished_at": datetime.now(timezone.utc).isoformat(),
         "model_name": model_name,
+        "dataset_source": dataset_source,
         "dataset_path": dataset_path,
         "dataset": dataset,
         "split": split,
@@ -288,6 +361,8 @@ def transcribe_dataset(
         "streaming": effective_streaming,
         "use_url": use_url,
         "num_samples": len(results["references"]),
+        "actual_models": dict(sorted(actual_models.items())),
+        "detected_languages": dict(sorted(detected_languages.items())),
         "wer_percent": wer_percent,
         "rtfx": rtfx,
         "manifest_path": str(Path(manifest_path).resolve()),
@@ -303,6 +378,12 @@ def transcribe_dataset(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Unified Transcription Script with Concurrency"
+    )
+    parser.add_argument(
+        "--dataset_source",
+        choices=("huggingface", "local"),
+        default="huggingface",
+        help="Dataset source adapter. Existing callers default to Hugging Face.",
     )
     parser.add_argument("--dataset_path", required=True)
     parser.add_argument("--dataset", required=True)
@@ -348,6 +429,8 @@ if __name__ == "__main__":
     effective_streaming = effective_streaming_for_model(args.model_name, args.streaming)
     if effective_streaming and args.use_url:
         parser.error("--streaming requires local audio; do not use --use_url")
+    if args.dataset_source == "local" and args.use_url:
+        parser.error("Local datasets cannot be combined with URL mode")
     if args.use_url and args.audio_preprocessor != "none":
         parser.error("--audio_preprocessor requires local audio; do not use --use_url")
     if args.use_url and args.vad_position != "none":
@@ -378,6 +461,7 @@ if __name__ == "__main__":
             prompt=args.prompt,
             args=args,
             output_dir=args.output_dir,
+            dataset_source=args.dataset_source,
         )
     except Exception as exc:
         output_path = Path(args.output_dir)
@@ -390,6 +474,7 @@ if __name__ == "__main__":
                     "model_name": args.model_name,
                     "dataset_path": args.dataset_path,
                     "dataset": args.dataset,
+                    "dataset_source": args.dataset_source,
                     "split": args.split,
                     "language": args.language,
                     "audio_preprocessor": args.audio_preprocessor,

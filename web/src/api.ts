@@ -8,19 +8,43 @@ export type Provider = {
   }>
   configured: boolean
 }
-
 export type LanguageOption = { code: string; label: string }
+
+export type DatasetSource = {
+  id: "huggingface" | "local"
+  label: string
+  kind: "huggingface" | "local"
+  description: string
+}
+
+export type DatasetOption = {
+  id: string
+  label: string
+  dataset_source: "huggingface" | "local"
+  dataset_path: string
+  dataset: string
+  splits: string[]
+  features: string[]
+  valid: boolean | null
+  error: string | null
+  validation_status?: "unchecked" | "valid" | "invalid"
+}
+
+export type DatasetCatalog = { source_id: string; datasets: DatasetOption[] }
+
 
 export type Options = {
   providers: Provider[]
   preprocessors: string[]
   vad_positions: string[]
+  dataset_sources: DatasetSource[]
   credentials: Record<string, boolean>
-  defaults: { model_name: string; dataset: string; split: string; max_workers: number }
+  defaults: { dataset_source: "huggingface" | "local"; model_name: string; dataset: string; split: string; max_workers: number }
 }
 
 export type RunConfig = {
   dataset_path: string
+  dataset_source: "huggingface" | "local"
   dataset: string
   split: string
   model_name: string
@@ -41,6 +65,15 @@ export type RunSummary = {
   rtfx?: number
   num_samples?: number
   error?: string
+  actual_models?: Record<string, number>
+  detected_languages?: Record<string, number>
+}
+
+export type RunProgress = {
+  completed_samples: number
+  total_samples: number | null
+  actual_models: Record<string, number>
+  detected_languages: Record<string, number>
 }
 
 export type Run = {
@@ -52,8 +85,19 @@ export type Run = {
   output_dir: string
   config: RunConfig
   summary: RunSummary | null
+  progress: RunProgress | null
   error: string | null
   artifacts: string[]
+}
+
+export class ApiError extends Error {
+  code?: string
+
+  constructor(message: string, code?: string) {
+    super(message)
+    this.name = "ApiError"
+    this.code = code
+  }
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -63,7 +107,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   })
   if (!response.ok) {
     const body = await response.json().catch(() => ({ detail: response.statusText }))
-    throw new Error(body.detail || "Request failed")
+    const detail = body.detail
+    const message = typeof detail === "string" ? detail : detail?.message
+    const code = typeof detail === "object" ? detail?.code : undefined
+    throw new ApiError(message || "Request failed", code)
   }
   return response.json() as Promise<T>
 }
@@ -75,5 +122,7 @@ export const api = {
   run: (id: string) => request<Run>(`/api/runs/${id}`),
   createRun: (config: RunConfig) => request<Run>("/api/runs", { method: "POST", body: JSON.stringify(config) }),
   cancelRun: (id: string) => request<Run>(`/api/runs/${id}/cancel`, { method: "POST" }),
+  retryRun: (id: string) => request<Run>(`/api/runs/${id}/retry`, { method: "POST" }),
   inspectDataset: (dataset_path: string) => request<{ dataset_path: string; configs: { name: string; splits: string[]; features: string[]; schema?: Record<string, unknown> }[] }>("/api/datasets/inspect", { method: "POST", body: JSON.stringify({ dataset_path }) }),
+  datasets: (source_id: string) => request<DatasetCatalog>(`/api/datasets?source_id=${encodeURIComponent(source_id)}`),
 }

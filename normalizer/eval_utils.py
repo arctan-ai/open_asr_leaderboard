@@ -385,6 +385,7 @@ def write_manifest(
     audio_length: list = None,
     transcription_time: list = None,
     audio_filepaths: list = None,
+    provider_metadata: list = None,
     basedir: str = "./results/",
 ):
     """
@@ -400,6 +401,7 @@ def write_manifest(
         audio_length: Length of each audio sample in seconds.
         transcription_time: Transcription time of each sample in seconds.
         audio_filepaths: List of file paths for each audio sample.
+        provider_metadata: Optional provider model/language evidence for each sample.
     Returns:
         Path to the manifest file.
     """
@@ -428,6 +430,11 @@ def write_manifest(
             f"The number of samples in `audio_filepaths` ({len(audio_filepaths)}) "
             f"must match `references` ({len(references)})."
         )
+    if provider_metadata is not None and len(provider_metadata) != len(references):
+        raise ValueError(
+            f"The number of samples in `provider_metadata` ({len(provider_metadata)}) "
+            f"must match `references` ({len(references)})."
+        )
 
     audio_length = (
         audio_length if audio_length is not None else len(references) * [None]
@@ -439,6 +446,11 @@ def write_manifest(
     )
     audio_filepaths = (
         audio_filepaths if audio_filepaths is not None else len(references) * [None]
+    )
+    provider_metadata = (
+        provider_metadata
+        if provider_metadata is not None
+        else len(references) * [None]
     )
 
     if not os.path.exists(basedir):
@@ -455,6 +467,7 @@ def write_manifest(
             audio_length,
             transcription_time,
             audio_filepath,
+            metadata,
         ) in enumerate(
             zip(
                 references,
@@ -462,6 +475,7 @@ def write_manifest(
                 audio_length,
                 transcription_time,
                 audio_filepaths,
+                provider_metadata,
             )
         ):
             datum = {
@@ -471,6 +485,8 @@ def write_manifest(
                 "text": text,
                 "pred_text": transcript,
             }
+            if metadata:
+                datum["provider_metadata"] = metadata
             f.write(f"{json.dumps(datum, ensure_ascii=False)}\n")
     return manifest_path
 

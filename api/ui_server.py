@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import asyncio
 import json
 import os
@@ -20,6 +19,12 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
+from api.dataset_catalog import (
+    DatasetValidationError,
+    dataset_catalog,
+    source_options,
+    validate_dataset_selection,
+)
 from api.language_catalog import MODEL_LANGUAGES, effective_mode, language_options
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -31,7 +36,7 @@ TERMINAL_STATES = {"completed", "failed", "cancelled", "interrupted"}
 PROVIDERS = {
     "assembly": {
         "label": "AssemblyAI",
-        "models": ["universal-3-pro"],
+        "models": ["universal-stt"],
         "credentials": ["ASSEMBLYAI_API_KEY"],
     },
     "cartesia": {
@@ -91,6 +96,7 @@ def env_configured(name: str) -> bool:
 
 
 class RunCreate(BaseModel):
+    dataset_source: Literal["huggingface", "local"] = "huggingface"
     dataset_path: str = Field(min_length=1, max_length=300)
     dataset: str = Field(default="default", min_length=1, max_length=200)
     split: str = Field(default="test", min_length=1, max_length=200)
@@ -140,7 +146,21 @@ class RunCreate(BaseModel):
                 f"Unsupported language '{self.language}' for {self.model_name} "
                 f"in {mode} mode. Allowed values: {', '.join(sorted(supported_codes))}"
             )
+        if self.dataset_source == "local":
+            relative = Path(self.dataset_path)
+            if (
+                relative.is_absolute()
+                or len(relative.parts) != 1
+                or relative.name.startswith(".")
+            ):
+                raise ValueError("Local dataset path must name an immediate child directory")
+            if self.dataset != "default" or self.split != "test":
+                raise ValueError(
+                    "Local datasets expose only config 'default' and split 'test'"
+                )
         forced_streaming = self.model_name == "soniox/stt-rt-v5"
+        if self.dataset_source == "local" and self.use_url:
+            raise ValueError("Local datasets cannot be combined with URL mode")
         if self.use_url and (self.streaming or forced_streaming):
             raise ValueError("URL mode cannot be combined with streaming")
         if self.use_url and prefix == "sarvam":
@@ -243,6 +263,15 @@ class RunStore:
         summary_json = result.pop("summary_json")
         result["summary"] = json.loads(summary_json) if summary_json else None
         output_dir = Path(result["output_dir"])
+        progress_path = output_dir / "progress.json"
+        result["progress"] = None
+        if progress_path.is_file():
+            try:
+                result["progress"] = json.loads(
+                    progress_path.read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError):
+                pass
         artifacts = []
         if output_dir.exists():
             artifacts = sorted(
@@ -266,6 +295,12 @@ class RunManager:
 
     def start(self, request: RunCreate) -> dict:
         self._validate_credentials(request)
+        validate_dataset_selection(
+            request.dataset_source,
+            request.dataset_path,
+            request.dataset,
+            request.split,
+        )
         run_id = uuid.uuid4().hex[:12]
         output_dir = self.store.root / run_id
         output_dir.mkdir(parents=True, exist_ok=False)
@@ -279,6 +314,15 @@ class RunManager:
         )
         thread.start()
         return self.store.get(run_id)
+
+    def retry(self, run_id: str) -> dict:
+        original = self.store.get(run_id)
+        if original is None:
+            raise KeyError(run_id)
+        if original["status"] not in TERMINAL_STATES:
+            raise RuntimeError("Only finished runs can be retried")
+        request = RunCreate.model_validate(original["config"])
+        return self.start(request)
 
     def _validate_credentials(self, request: RunCreate):
         prefix = request.model_name.split("/", 1)[0]
@@ -310,6 +354,8 @@ class RunManager:
             sys.executable,
             "-u",
             str(self.runner_path),
+            "--dataset_source",
+            request.dataset_source,
             "--dataset_path",
             request.dataset_path,
             "--dataset",
@@ -481,10 +527,12 @@ def options_payload() -> dict:
         "providers": providers,
         "preprocessors": PREPROCESSORS,
         "vad_positions": VAD_POSITIONS,
+        "dataset_sources": source_options(),
         "credentials": {
             name: env_configured(name) for name in sorted(credential_names)
         },
         "defaults": {
+            "dataset_source": "huggingface",
             "model_name": "deepgram/nova-3",
             "dataset": "default",
             "split": "test",
@@ -517,6 +565,18 @@ def create_app(
     @app.get("/api/options")
     def options():
         return options_payload()
+
+    @app.get("/api/datasets")
+    async def list_datasets(source_id: str):
+        try:
+            return await asyncio.to_thread(dataset_catalog, source_id)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404, detail="Dataset source not found"
+            ) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
 
     @app.post("/api/datasets/inspect")
     async def inspect_dataset(request: DatasetInspect):
@@ -551,6 +611,11 @@ def create_app(
     def create_run(request: RunCreate):
         try:
             return manager.start(request)
+        except DatasetValidationError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "dataset_incompatible", "message": str(exc)},
+            ) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -572,14 +637,32 @@ def create_app(
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="Run not found") from exc
 
+    @app.post("/api/runs/{run_id}/retry", status_code=201)
+    def retry_run(run_id: str):
+        try:
+            return manager.retry(run_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Run not found") from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except DatasetValidationError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "dataset_incompatible", "message": str(exc)},
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.get("/api/runs/{run_id}/events")
     async def run_events(run_id: str):
+
         if store.get(run_id) is None:
             raise HTTPException(status_code=404, detail="Run not found")
 
         async def events():
             offset = 0
             last_status = None
+            last_progress = None
             while True:
                 run = store.get(run_id)
                 if run is None:
@@ -597,6 +680,10 @@ def create_app(
                 if run["status"] != last_status:
                     last_status = run["status"]
                     yield f"event: status\ndata: {json.dumps(run)}\n\n"
+                progress = run.get("progress")
+                if progress != last_progress:
+                    last_progress = progress
+                    yield f"event: progress\ndata: {json.dumps(run)}\n\n"
                 if run["status"] in TERMINAL_STATES:
                     break
                 yield ": keep-alive\n\n"

@@ -43,8 +43,8 @@ Open `http://127.0.0.1:5173`. Vite proxies `/api` requests to the backend on `12
 
 ## Using the console
 
-1. Enter a Hugging Face dataset ID, then select **Inspect** to verify access and load its configurations, splits, and audio schema.
-2. Select the dataset configuration, split, provider/model, and language.
+1. Select the local or Hugging Face source; dataset names, configurations, and splits load without schema inspection.
+2. Select the dataset, split, provider/model, and language. The selected dataset is schema-validated when you request the evaluation.
 3. Configure workers and an optional sample limit. A blank sample limit evaluates the full split.
 4. Select an optional audio preprocessor and VAD position:
    - **Pre VAD:** audio → VAD → preprocessor → ASR
@@ -54,7 +54,7 @@ Open `http://127.0.0.1:5173`. Vite proxies `/api` requests to the backend on `12
 6. Open **Advanced** for the Arctan chunk size, preprocessing batch size, or provider prompt.
 7. Select **Run evaluation**. Runs start immediately and there is no global concurrency limit.
 
-The header shows service health, active-run count, theme controls, and credential availability. Select a run from the history table to view its configuration, live logs, WER, RTFx, sample count, errors, downloadable artifacts, or cancellation control.
+The header shows service health, active-run count, theme controls, and credential availability. Select a run from the history table to view its configuration, live logs, WER, RTFx, sample count, errors, downloadable artifacts, cancellation control, or retry a finished evaluation with the same configuration.
 
 Each run is isolated under:
 
@@ -63,6 +63,17 @@ results/ui-runs/<run-id>/
 ```
 
 Run history is persisted in SQLite using WAL mode. Active runs left unfinished by a backend restart are marked `interrupted`.
+
+## Dataset sources
+
+The console loads datasets from two server-configured sources:
+
+- **Hugging Face:** `OPEN_ASR_HF_DATASET_REPOS`, a comma-separated list defaulting to `bettercallaaryan/nc_agent_clips_openasr` and `bettercallaaryan/acefone_stt_eval_openasr`. Each repository config appears as a dataset option and retains its published splits. The legacy singular `OPEN_ASR_HF_DATASET_REPO` remains supported.
+- **Local:** `OPEN_ASR_LOCAL_DATASET_ROOT`, defaulting to `/home/ubuntu/dataset`. Each non-hidden immediate child directory appears as a dataset option.
+
+A local child directory must contain `metadata.csv`, or exactly one CSV file when `metadata.csv` is absent. The manifest must have an `audio` column and one transcript column named `text`, `sentence`, `normalized_text`, `transcript`, or `transcription`. Local audio values must be relative paths within that child directory. Local datasets expose the synthetic config/split `default/test` and cannot use remote URL mode.
+
+Discovery only enumerates candidates and split metadata so the dropdown stays fast. When a run is requested, the server validates the selected schema for an `audio` column, a supported transcript column, and the selected split before starting the evaluator. It still does not scan rows, verify files, or decode audio; those failures are reported by the evaluator after the run starts.
 
 ## Compatibility rules
 
@@ -91,18 +102,9 @@ uv run uvicorn api.ui_server:app \
 
 ## `livekit-server` deployment
 
-The repository includes `deploy/open-asr-console.service`, configured for `/home/ubuntu/open_asr_leaderboard` and a localhost-only listener on port `8080`. The current `livekit-server` host does not provide Node.js, so build the frontend locally or in CI and copy the compiled assets to the server.
+The repository includes `deploy/open-asr-console.service`, configured for `/home/ubuntu/open_asr_leaderboard` and a localhost-only listener on port `8080`. `livekit-server` has Node.js and npm, so build the frontend directly on the server.
 
-From the repository root on a machine with Node.js:
-
-```bash
-npm --prefix web ci
-npm --prefix web run build
-rsync -az web/dist/ \
-  livekit-server:/home/ubuntu/open_asr_leaderboard/web/dist/
-```
-
-Then on `livekit-server`:
+One-time setup on `livekit-server`:
 
 ```bash
 cd /home/ubuntu/open_asr_leaderboard
@@ -116,19 +118,20 @@ sudo systemctl daemon-reload
 sudo systemctl enable open-asr-console.service
 sudo systemctl restart open-asr-console.service
 sudo systemctl status open-asr-console.service --no-pager
-curl --fail --silent --show-error http://127.0.0.1:8080/api/health
-curl --fail --silent --show-error http://127.0.0.1:8080/api/options
 ```
 
-Always restart the service after deploying backend code. `systemctl enable --now`
-does not restart a service that is already running, so using it by itself can leave
-an old Python process serving an API that is incompatible with the newly copied
-frontend. A restart interrupts active evaluations; check the active-run count in
-`/api/health` before restarting when the console is in use.
+After pulling frontend or backend changes, run this from the repository root:
 
-The two `curl` checks must succeed before opening the UI. If the service has only
-just started and the first request is refused, wait a second and retry. If either
-endpoint continues to fail, inspect the current startup logs with:
+```bash
+./sync_console.sh
+```
+
+It installs the frontend dependencies specified in `web/package-lock.json`, builds
+`web/dist`, restarts `open-asr-console.service`, and waits for `/api/health` to
+respond. The restart interrupts active evaluations; check the active-run count in
+`/api/health` before syncing when the console is in use.
+
+If the health check fails, inspect the current startup logs with:
 
 ```bash
 sudo journalctl -u open-asr-console.service -n 100 --no-pager

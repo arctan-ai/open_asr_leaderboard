@@ -20,12 +20,12 @@ export DEEPGRAM_API_KEY="your_api_key"
 # Streaming examples, run directly when needed:
 # python run_eval_ml.py --dataset_path="$DATASET_PATH" --config_name=fleurs_de --language=de --split=test --model_name deepgram/nova-3 --max_workers=16 --streaming
 # python run_eval_ml.py --dataset_path="$DATASET_PATH" --config_name=fleurs_de --language=de --split=test --model_name soniox/stt-async-v5 --max_workers=16 --streaming
-# python run_eval_ml.py --dataset_path="$DATASET_PATH" --config_name=fleurs_de --language=de --split=test --model_name assembly/universal-3-pro --max_workers=4 --streaming
+# python run_eval_ml.py --dataset_path="$DATASET_PATH" --config_name=fleurs_de --language=de --split=test --model_name assembly/universal-stt --max_workers=4 --streaming
 MODEL_IDs=(
     # "openai/gpt-4o-transcribe"
     # "openai/gpt-4o-mini-transcribe"
     # "openai/whisper-1"
-    # "assembly/universal-3-pro"
+    # "assembly/universal-stt"
     # "elevenlabs/scribe_v2"
     # "speechmatics/enhanced"
     # "soniox/stt-async-v5"
@@ -68,25 +68,22 @@ run_evaluation() {
     echo "   Time: $(date)"
     echo "----------------------------------------"
 
-    python run_eval_ml.py \
+    if ! python run_eval_ml.py \
         --dataset_path="$DATASET_PATH" \
         --config_name="$config_name" \
         --language="$language" \
         --split="test" \
         --model_name="$model_id" \
         --max_workers="$MAX_WORKERS" \
-        "${prompt_args[@]}"
-
-    local exit_code=$?
-
-    if [ $exit_code -eq 0 ]; then
-        echo "Evaluation completed successfully for $config_name"
-    else
-        echo "Evaluation failed for $config_name (exit code: $exit_code)"
+        "${prompt_args[@]}"; then
+        echo "Evaluation failed for $config_name; stopping batch."
+        return 1
     fi
 
+    echo "Evaluation completed successfully for $config_name"
+
     echo "----------------------------------------"
-    return $exit_code
+    return 0
 }
 
 # Main execution
@@ -112,7 +109,10 @@ for MODEL_ID in "${MODEL_IDs[@]}"; do
             echo ""
 
             for language in $languages; do
-                run_evaluation "$MODEL_ID" "$dataset" "$language"
+                if ! run_evaluation "$MODEL_ID" "$dataset" "$language"; then
+                    echo "Stopping multilingual batch after evaluation failure."
+                    exit 1
+                fi
             done
         fi
     done

@@ -1,11 +1,70 @@
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import Optional
+
+
+_RATE_LIMIT_MARKERS = (
+    "rate limit",
+    "rate-limit",
+    "rate_limit",
+    "too many requests",
+    "quota exceeded",
+    "quota exhausted",
+    "subscription exceeded",
+    "subscription limit",
+)
 
 
 class PermanentError(Exception):
     """Error that should not be retried (e.g., URL fetch failure)."""
 
     pass
+
+
+@dataclass(frozen=True)
+class ProviderTranscription:
+    """Provider text plus auditable information about the ASR that produced it."""
+
+    text: str
+    actual_model: str | None = None
+    detected_languages: tuple[str, ...] = field(default_factory=tuple)
+
+
+def as_provider_transcription(
+    value: str | ProviderTranscription,
+    *,
+    fallback_model: str,
+) -> ProviderTranscription:
+    if isinstance(value, ProviderTranscription):
+        if value.actual_model:
+            return value
+        return ProviderTranscription(
+            text=value.text,
+            actual_model=fallback_model,
+            detected_languages=value.detected_languages,
+        )
+    return ProviderTranscription(text=value, actual_model=fallback_model)
+
+
+def is_rate_limit_error(error: BaseException) -> bool:
+    """Return whether an exception chain represents exhausted API capacity."""
+    seen = set()
+    current = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+
+        status_code = getattr(current, "status_code", None)
+        response = getattr(current, "response", None)
+        if status_code == 429 or getattr(response, "status_code", None) == 429:
+            return True
+
+        message = str(current).lower()
+        if any(marker in message for marker in _RATE_LIMIT_MARKERS):
+            return True
+
+        current = current.__cause__ or current.__context__
+
+    return False
 
 
 class APIProvider(ABC):
@@ -18,7 +77,7 @@ class APIProvider(ABC):
         use_url: bool = False,
         language: str = "en",
         prompt: Optional[str] = None,
-    ) -> str:
+    ) -> str | ProviderTranscription:
         """Transcribe audio and return the text."""
         ...
 
@@ -30,7 +89,7 @@ class APIProvider(ABC):
         use_url: bool = False,
         language: str = "en",
         prompt: Optional[str] = None,
-    ) -> str:
+    ) -> str | ProviderTranscription:
         """Transcribe audio through a streaming ASR endpoint and return the text."""
         raise PermanentError(
             f"Streaming ASR is not supported for {self.__class__.__name__}"

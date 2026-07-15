@@ -127,7 +127,9 @@ npm --prefix web run dev
 ```
 
 Build the production assets with `npm --prefix web run build`; FastAPI serves
-the resulting `web/dist` directory.
+the resulting `web/dist` directory. On the production server, run
+`./sync_console.sh` after pulling changes to install locked frontend dependencies,
+build the assets, and restart the console service.
 
 Production on `livekit-server` serves the built Vite app and API from the same localhost-only process. After installing `deploy/open-asr-console.service`, connect with:
 

@@ -1,4 +1,5 @@
 import argparse
+import json
 from typing import Optional
 from pathlib import Path
 import sys
@@ -21,7 +22,14 @@ from dotenv import load_dotenv
 from normalizer import data_utils
 from normalizer.eval_utils import normalize_compound_pairs
 import concurrent.futures
-from providers import get_provider, PermanentError
+import threading
+from datetime import datetime, timezone
+from providers import (
+    PermanentError,
+    as_provider_transcription,
+    get_provider,
+    is_rate_limit_error,
+)
 
 load_dotenv()
 
@@ -78,6 +86,7 @@ def transcribe_with_retry(
     streaming=False,
     language="en",
     prompt=None,
+    stop_event=None,
 ):
     provider, variant = get_provider(model_name)
     effective_streaming = streaming or provider.force_streaming_for_model(variant)
@@ -89,16 +98,25 @@ def transcribe_with_retry(
         kwargs["prompt"] = prompt
     retries = 0
     while retries <= max_retries:
+        if stop_event is not None and stop_event.is_set():
+            raise RuntimeError("Transcription cancelled after rate limit failure")
         try:
             transcribe_fn = (
                 provider.transcribe_streaming
                 if effective_streaming
                 else provider.transcribe
             )
-            return transcribe_fn(variant, audio_file_path, sample, **kwargs)
-        except PermanentError:
+            result = transcribe_fn(variant, audio_file_path, sample, **kwargs)
+            return as_provider_transcription(result, fallback_model=model_name)
+        except PermanentError as e:
+            if is_rate_limit_error(e) and stop_event is not None:
+                stop_event.set()
             raise
         except Exception as e:
+            if is_rate_limit_error(e):
+                if stop_event is not None:
+                    stop_event.set()
+                raise
             retries += 1
             if retries > max_retries:
                 raise e
@@ -128,7 +146,9 @@ def transcribe_dataset(
     max_samples=None,
     max_workers=4,
     prompt=None,
+    output_dir="./results",
 ):
+    started_at = datetime.now(timezone.utc).isoformat()
     effective_streaming = effective_streaming_for_model(model_name, streaming)
     if effective_streaming and use_url:
         raise ValueError("--streaming requires local audio; do not use --use_url")
@@ -152,6 +172,7 @@ def transcribe_dataset(
         "audio_length_s": [],
         "transcription_time_s": [],
     }
+    stop_event = threading.Event()
 
     print(
         f"Transcribing with model: {model_name}, language: {language}, "
@@ -159,6 +180,8 @@ def transcribe_dataset(
     )
 
     def process_sample(sample):
+        if stop_event.is_set():
+            return None
         if use_url:
             reference = sample["row"]["text"].strip()
             audio_duration = sample["row"]["audio_length_s"]
@@ -172,8 +195,12 @@ def transcribe_dataset(
                     streaming=effective_streaming,
                     language=language,
                     prompt=prompt,
+                    stop_event=stop_event,
                 )
             except Exception as e:
+                if is_rate_limit_error(e):
+                    stop_event.set()
+                    raise
                 print(f"Failed to transcribe after retries: {e}")
                 return None
 
@@ -201,8 +228,12 @@ def transcribe_dataset(
                     streaming=effective_streaming,
                     language=language,
                     prompt=prompt,
+                    stop_event=stop_event,
                 )
             except Exception as e:
+                if is_rate_limit_error(e):
+                    stop_event.set()
+                    raise
                 print(f"Failed to transcribe after retries: {e}")
                 os.unlink(tmp_path)
                 return None
@@ -224,10 +255,16 @@ def transcribe_dataset(
             total=len(future_to_sample),
             desc="Transcribing",
         ):
-            result = future.result()
+            try:
+                result = future.result()
+            except Exception:
+                stop_event.set()
+                for pending in future_to_sample:
+                    pending.cancel()
+                raise
             if result:
                 reference, transcription, audio_duration, transcription_time = result
-                results["predictions"].append(transcription)
+                results["predictions"].append(transcription.text)
                 results["references"].append(reference)
                 results["audio_length_s"].append(audio_duration)
                 results["transcription_time_s"].append(transcription_time)
@@ -261,6 +298,7 @@ def transcribe_dataset(
         split,
         audio_length=results["audio_length_s"],
         transcription_time=results["transcription_time_s"],
+        basedir=output_dir,
     )
 
     print("Results saved at path:", manifest_path)
@@ -281,6 +319,30 @@ def transcribe_dataset(
 
     print("WER:", wer_percent, "%")
     print("RTFx:", rtfx)
+    summary = {
+        "status": "completed",
+        "started_at": started_at,
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+        "model_name": model_name,
+        "dataset_path": dataset_path,
+        "dataset": config_name,
+        "split": split,
+        "language": language,
+        "audio_preprocessor": "none",
+        "vad_position": "none",
+        "streaming": effective_streaming,
+        "use_url": use_url,
+        "num_samples": len(results["references"]),
+        "wer_percent": wer_percent,
+        "rtfx": rtfx,
+        "manifest_path": str(Path(manifest_path).resolve()),
+    }
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    (output_path / "summary.json").write_text(
+        json.dumps(summary, indent=2) + "\n", encoding="utf-8"
+    )
+    return summary
 
 
 if __name__ == "__main__":
@@ -299,6 +361,11 @@ if __name__ == "__main__":
         help="Prefix model name with provider prefix (e.g., 'assembly/', 'smallestai/', 'soniox/', or 'deepgram/')",
     )
     parser.add_argument("--max_samples", type=int, default=None)
+    parser.add_argument(
+        "--output_dir",
+        default="./results",
+        help="Directory for the manifest and structured summary.json output.",
+    )
     parser.add_argument(
         "--max_workers", type=int, default=300, help="Number of concurrent threads"
     )
@@ -324,15 +391,63 @@ if __name__ == "__main__":
     if effective_streaming and args.use_url:
         parser.error("--streaming requires local audio; do not use --use_url")
 
-    transcribe_dataset(
-        dataset_path=args.dataset_path,
-        config_name=args.config_name,
-        split=args.split,
+    data_utils.post_slack_run_started(
         model_name=args.model_name,
-        language=args.language,
-        use_url=args.use_url,
-        streaming=effective_streaming,
+        dataset_path=args.dataset_path,
+        dataset_name=args.config_name,
+        split=args.split,
         max_samples=args.max_samples,
         max_workers=args.max_workers,
-        prompt=args.prompt,
+        audio_preprocessor="none",
+        streaming=effective_streaming,
     )
+    try:
+        transcribe_dataset(
+            dataset_path=args.dataset_path,
+            config_name=args.config_name,
+            split=args.split,
+            model_name=args.model_name,
+            language=args.language,
+            use_url=args.use_url,
+            streaming=effective_streaming,
+            max_samples=args.max_samples,
+            max_workers=args.max_workers,
+            prompt=args.prompt,
+            output_dir=args.output_dir,
+        )
+    except Exception as exc:
+        output_path = Path(args.output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        (output_path / "summary.json").write_text(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "finished_at": datetime.now(timezone.utc).isoformat(),
+                    "model_name": args.model_name,
+                    "dataset_path": args.dataset_path,
+                    "dataset": args.config_name,
+                    "split": args.split,
+                    "language": args.language,
+                    "audio_preprocessor": "none",
+                    "vad_position": "none",
+                    "streaming": effective_streaming,
+                    "use_url": args.use_url,
+                    "error": str(exc),
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        data_utils.post_slack_run_failed(
+            model_name=args.model_name,
+            dataset_path=args.dataset_path,
+            dataset_name=args.config_name,
+            split=args.split,
+            max_samples=args.max_samples,
+            max_workers=args.max_workers,
+            audio_preprocessor="none",
+            error=exc,
+            streaming=effective_streaming,
+        )
+        raise

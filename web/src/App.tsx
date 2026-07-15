@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react"
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   Activity,
   AlertTriangle,
@@ -14,13 +14,14 @@ import {
   Play,
   RefreshCw,
   Server,
+  RotateCcw,
   Settings2,
   Sun,
   TerminalSquare,
   Zap,
 } from "lucide-react"
 import { toast } from "sonner"
-import { api, type Options, type Run, type RunConfig } from "./api"
+import { ApiError, api, type DatasetOption, type Options, type Run, type RunConfig } from "./api"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -32,6 +33,7 @@ import { Switch } from "@/components/ui/switch"
 const ACTIVE_STATES = new Set(["queued", "running", "cancelling"])
 
 const DEFAULT_CONFIG: RunConfig = {
+  dataset_source: "huggingface",
   dataset_path: "bettercallaaryan/nc_agent_clips_openasr",
   dataset: "default",
   split: "test",
@@ -83,6 +85,20 @@ function pipelineLabel(run: Run) {
   return pieces.length ? pieces.join(" → ") : "Raw audio"
 }
 
+function configuredModelLabel(modelName: string) {
+  return modelName === "assembly/universal-stt" ? "Assembly Universal STT" : modelName
+}
+
+function observedCounts(run: Run, key: "actual_models" | "detected_languages") {
+  return run.progress?.[key] || run.summary?.[key] || {}
+}
+
+function countLabel(counts: Record<string, number>) {
+  const entries = Object.entries(counts)
+  if (!entries.length) return "Waiting for provider response…"
+  return entries.map(([name, count]) => `${name} · ${count}`).join("  |  ")
+}
+
 function elapsed(run: Run) {
   const start = run.started_at || run.created_at
   const end = run.finished_at || new Date().toISOString()
@@ -94,8 +110,15 @@ function elapsed(run: Run) {
 function RunComposer({ options, activeCount, onCreated }: { options: Options; activeCount: number; onCreated: (run: Run) => void }) {
   const [config, setConfig] = useState<RunConfig>(DEFAULT_CONFIG)
   const [submitting, setSubmitting] = useState(false)
-  const [inspecting, setInspecting] = useState(false)
-  const [datasetNote, setDatasetNote] = useState<string | null>(null)
+  const [datasets, setDatasets] = useState<DatasetOption[]>([])
+  const [datasetsLoading, setDatasetsLoading] = useState(false)
+  const [datasetError, setDatasetError] = useState<string | null>(null)
+  const datasetRequest = useRef(0)
+  const [datasetValidation, setDatasetValidation] = useState<{
+    selectionKey: string
+    status: "checking" | "valid" | "invalid"
+    message: string
+  } | null>(null)
 
   const modelOptions = useMemo(() => options.providers.flatMap((provider) => provider.models.map((model) => ({ value: `${provider.prefix}/${model}`, label: `${provider.label} · ${model}`, configured: provider.configured }))), [options])
   const provider = options.providers.find((item) => config.model_name.startsWith(`${item.prefix}/`))
@@ -109,7 +132,7 @@ function RunComposer({ options, activeCount, onCreated }: { options: Options; ac
   )
   const unsupportedMode = languageOptions.length === 0
   const providerRequiresLocal = isSarvam
-  const localTransforms = config.streaming || forcedStreaming || providerRequiresLocal || config.audio_preprocessor !== "none" || config.vad_position !== "none"
+  const localTransforms = config.dataset_source === "local" || config.streaming || forcedStreaming || providerRequiresLocal || config.audio_preprocessor !== "none" || config.vad_position !== "none"
   const preprocessorCredentials: Record<string, string[]> = {
     arctan: ["ARCTAN_SDK_KEY"],
     ai_coustics_vfl_2_1: ["LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"],
@@ -128,36 +151,78 @@ function RunComposer({ options, activeCount, onCreated }: { options: Options; ac
     setConfig((current) => ({ ...current, [key]: value }))
   }
 
-  async function inspectDataset() {
-    setInspecting(true)
-    setDatasetNote(null)
-    try {
-      const result = await api.inspectDataset(config.dataset_path)
-      const first = result.configs[0]
-      if (first) {
-        update("dataset", first.name)
-        if (first.splits[0]) update("split", first.splits[0])
-        setDatasetNote(`${result.configs.length} config${result.configs.length === 1 ? "" : "s"} · ${first.features.join(", ")}`)
-      } else {
-        setDatasetNote("Dataset is reachable but exposes no configs.")
-      }
-      toast.success("Dataset verified")
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Dataset inspection failed")
-    } finally {
-      setInspecting(false)
-    }
-  }
+  const selectedDataset = datasets.find((item) => item.dataset_source === config.dataset_source && item.dataset_path === config.dataset_path && item.dataset === config.dataset)
+  const selectionKey = selectedDataset ? `${selectedDataset.id}::${config.split}` : ""
 
+  const loadDatasets = useCallback(async (source: RunConfig["dataset_source"]) => {
+    const requestId = ++datasetRequest.current
+    setDatasetsLoading(true)
+    setDatasetError(null)
+    setDatasetValidation(null)
+    try {
+      const result = await api.datasets(source)
+      if (requestId !== datasetRequest.current) return
+      setDatasets(result.datasets)
+      const first = result.datasets.find((item) => item.splits.length > 0)
+      setConfig((current) => {
+        if (current.dataset_source !== source) return current
+        return {
+          ...current,
+          dataset_path: first?.dataset_path ?? "",
+          dataset: first?.dataset ?? "",
+          split: first?.splits[0] ?? "",
+          use_url: source === "local" ? false : current.use_url,
+        }
+      })
+    } catch (error) {
+      if (requestId !== datasetRequest.current) return
+      setDatasets([])
+      setDatasetError(error instanceof Error ? error.message : "Could not load datasets")
+      setConfig((current) => current.dataset_source === source ? { ...current, dataset_path: "", dataset: "", split: "" } : current)
+    } finally {
+      if (requestId === datasetRequest.current) setDatasetsLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadDatasets(config.dataset_source)
+  }, [config.dataset_source, loadDatasets])
+
+  function selectDataset(id: string) {
+    const selected = datasets.find((item) => item.id === id)
+    if (!selected) return
+    setConfig((current) => ({
+      ...current,
+      dataset_path: selected.dataset_path,
+      dataset: selected.dataset,
+      split: selected.splits[0],
+    }))
+  }
   async function submit(event: FormEvent) {
     event.preventDefault()
     setSubmitting(true)
+    setDatasetValidation({
+      selectionKey,
+      status: "checking",
+      message: "Checking the selected dataset format…",
+    })
     try {
       const run = await api.createRun(config)
-      toast.success("Evaluation started", { description: `${run.config.model_name} · ${run.id}` })
+      toast.success("Evaluation started", { description: `${configuredModelLabel(run.config.model_name)} · ${run.id}` })
+      setDatasetValidation({
+        selectionKey,
+        status: "valid",
+        message: "This dataset is compatible with the evaluator.",
+      })
       onCreated(run)
     } catch (error) {
-      toast.error("Could not start evaluation", { description: error instanceof Error ? error.message : "Unknown error" })
+      const message = error instanceof Error ? error.message : "Unknown error"
+      setDatasetValidation(
+        error instanceof ApiError && error.code === "dataset_incompatible"
+          ? { selectionKey, status: "invalid", message }
+          : null,
+      )
+      toast.error("Could not start evaluation", { description: message })
     } finally {
       setSubmitting(false)
     }
@@ -179,19 +244,40 @@ function RunComposer({ options, activeCount, onCreated }: { options: Options; ac
 
       <div className="form-section">
         <div className="section-label"><Database className="size-4" />Dataset</div>
-        <Field label="Hugging Face path">
+        <Field label="Source">
+          <Select value={config.dataset_source} onValueChange={(value) => setConfig((current) => ({ ...current, dataset_source: value as RunConfig["dataset_source"], dataset_path: "", dataset: "", split: "", use_url: value === "local" ? false : current.use_url }))}>
+            <SelectTrigger><SelectValue /></SelectTrigger>
+            <SelectContent>{options.dataset_sources.map((source) => <SelectItem value={source.id} key={source.id}>{source.label} · {source.description}</SelectItem>)}</SelectContent>
+          </Select>
+        </Field>
+        <Field label="Dataset">
           <div className="joined-control">
-            <Input value={config.dataset_path} onChange={(event) => update("dataset_path", event.target.value)} placeholder="owner/dataset" />
-            <Button type="button" variant="outline" onClick={inspectDataset} disabled={inspecting || !config.dataset_path}>
-              <RefreshCw className={`size-4 ${inspecting ? "spin" : ""}`} />Inspect
+            <Select disabled={datasetsLoading || datasets.length === 0} value={selectedDataset?.id ?? ""} onValueChange={selectDataset}>
+              <SelectTrigger><SelectValue placeholder={datasetsLoading ? "Loading datasets…" : "Select a dataset"} /></SelectTrigger>
+              <SelectContent>{datasets.map((item) => <SelectItem value={item.id} key={item.id}>{item.label}</SelectItem>)}</SelectContent>
+            </Select>
+            <Button type="button" variant="outline" onClick={() => void loadDatasets(config.dataset_source)} disabled={datasetsLoading} aria-label="Refresh datasets">
+              <RefreshCw className={`size-4 ${datasetsLoading ? "spin" : ""}`} />
             </Button>
           </div>
         </Field>
-        {datasetNote && <div className="dataset-note"><Check className="size-3.5" />{datasetNote}</div>}
-        <div className="form-grid-2">
-          <Field label="Config"><Input value={config.dataset} onChange={(event) => update("dataset", event.target.value)} /></Field>
-          <Field label="Split"><Input value={config.split} onChange={(event) => update("split", event.target.value)} /></Field>
-        </div>
+        {datasetError && <div className="dataset-load-error" role="alert"><AlertTriangle className="size-3.5" />{datasetError}</div>}
+        {!datasetsLoading && !datasetError && datasets.length === 0 && <div className="dataset-empty">This source exposes no dataset candidates.</div>}
+        {selectedDataset && datasetValidation?.selectionKey !== selectionKey && <div className="dataset-note dataset-unchecked"><Database className="size-3.5" />Format compatibility will be checked when you run the evaluation.</div>}
+        {datasetValidation?.selectionKey === selectionKey && <div className={`dataset-note dataset-${datasetValidation.status}`} role={datasetValidation.status === "invalid" ? "alert" : "status"}>
+          {datasetValidation.status === "valid"
+            ? <Check className="size-3.5" />
+            : datasetValidation.status === "invalid"
+              ? <AlertTriangle className="size-3.5" />
+              : <RefreshCw className="size-3.5 spin" />}
+          {datasetValidation.message}
+        </div>}
+        <Field label="Split">
+          <Select disabled={!selectedDataset} value={config.split} onValueChange={(value) => update("split", value)}>
+            <SelectTrigger><SelectValue placeholder="Select a split" /></SelectTrigger>
+            <SelectContent>{selectedDataset?.splits.map((split) => <SelectItem value={split} key={split}>{split}</SelectItem>)}</SelectContent>
+          </Select>
+        </Field>
       </div>
 
       <div className="form-section">
@@ -203,7 +289,7 @@ function RunComposer({ options, activeCount, onCreated }: { options: Options; ac
           </Select>
         </Field>
         <Field label="Language" hint={unsupportedMode ? `${effectiveStreaming ? "Streaming" : "Batch"} evaluation is not supported for this model` : config.language === "unknown" ? "The provider detects the spoken language" : "Only languages supported by this model and mode are shown"}>
-          <Select disabled={unsupportedMode} value={unsupportedMode ? undefined : config.language} onValueChange={(value) => update("language", value)}>
+          <Select disabled={unsupportedMode} value={unsupportedMode ? "" : config.language} onValueChange={(value) => update("language", value)}>
             <SelectTrigger><SelectValue placeholder="No supported language options" /></SelectTrigger>
             <SelectContent>{languageOptions.map((option) => <SelectItem value={option.code} key={option.code}>{option.label} ({option.code})</SelectItem>)}</SelectContent>
           </Select>
@@ -234,7 +320,7 @@ function RunComposer({ options, activeCount, onCreated }: { options: Options; ac
           <div className="pipeline-preview"><span>Pipeline</span><strong>{config.vad_position === "pre" ? "Audio → VAD → Processor → ASR" : "Audio → Processor → VAD → ASR"}</strong></div>
         )}
         <ToggleRow label="Streaming endpoint" description="Send paced PCM chunks to supported providers." checked={config.streaming} onCheckedChange={(checked) => { update("streaming", checked); if (checked) update("use_url", false) }} />
-        <ToggleRow label="Remote URL mode" description={localTransforms ? "Unavailable while streaming, preprocessing, VAD, or a real-time-only model is enabled." : "Let supported providers fetch dataset audio URLs directly."} checked={config.use_url} disabled={localTransforms} onCheckedChange={(checked) => update("use_url", checked)} />
+        <ToggleRow label="Remote URL mode" description={config.dataset_source === "local" ? "Unavailable for local datasets." : localTransforms ? "Unavailable while streaming, preprocessing, VAD, or a real-time-only model is enabled." : "Let supported providers fetch dataset audio URLs directly."} checked={config.use_url} disabled={localTransforms} onCheckedChange={(checked) => update("use_url", checked)} />
       </div>
 
       <details className="advanced-panel">
@@ -250,9 +336,9 @@ function RunComposer({ options, activeCount, onCreated }: { options: Options; ac
 
       {missingCredential && <div className="credential-error"><KeyRound className="size-4" />{missingPreprocessorCredential ? `${missingPreprocessorCredential} is missing on the server.` : `${provider?.label || "Provider"} credentials are missing on the server.`}</div>}
 
-      <Button type="submit" className="h-11 w-full" disabled={submitting || missingCredential || unsupportedMode}>
+      <Button type="submit" className="h-11 w-full" disabled={submitting || datasetsLoading || !selectedDataset || !config.split || missingCredential || unsupportedMode}>
         {submitting ? <RefreshCw className="size-4 spin" /> : <Play className="size-4 fill-current" />}
-        {submitting ? "Starting…" : "Run evaluation"}
+        {submitting ? "Checking dataset…" : "Run evaluation"}
       </Button>
     </form>
   )
@@ -269,7 +355,7 @@ function RunTable({ runs, onSelect }: { runs: Run[]; onSelect: (run: Run) => voi
         <tbody>{runs.map((run) => (
           <tr key={run.id} onClick={() => onSelect(run)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") onSelect(run) }}>
             <td><StatusBadge status={run.status} /></td>
-            <td><div className="cell-primary">{run.config.model_name}</div><div className="cell-secondary">{run.id}</div></td>
+            <td><div className="cell-primary">{configuredModelLabel(run.config.model_name)}</div><div className="cell-secondary">{Object.keys(observedCounts(run, "actual_models")).length ? countLabel(observedCounts(run, "actual_models")) : run.id}</div></td>
             <td><div className="cell-primary truncate-cell">{run.config.dataset_path}</div><div className="cell-secondary">{run.config.dataset} · {run.config.split}</div></td>
             <td><span className="pipeline-cell">{pipelineLabel(run)}</span></td>
             <td className="metric-cell">{run.summary?.wer_percent != null ? `${run.summary.wer_percent}%` : "—"}</td>
@@ -283,9 +369,10 @@ function RunTable({ runs, onSelect }: { runs: Run[]; onSelect: (run: Run) => voi
   )
 }
 
-function RunDetail({ selected, open, onOpenChange, onUpdated }: { selected: Run | null; open: boolean; onOpenChange: (open: boolean) => void; onUpdated: (run: Run) => void }) {
+function RunDetail({ selected, open, onOpenChange, onUpdated, onRetried }: { selected: Run | null; open: boolean; onOpenChange: (open: boolean) => void; onUpdated: (run: Run) => void; onRetried: (run: Run) => void }) {
   const [run, setRun] = useState<Run | null>(selected)
   const [logs, setLogs] = useState("")
+  const [retrying, setRetrying] = useState(false)
   const selectedRef = useRef(selected)
   const onUpdatedRef = useRef(onUpdated)
   selectedRef.current = selected
@@ -295,6 +382,7 @@ function RunDetail({ selected, open, onOpenChange, onUpdated }: { selected: Run 
   useEffect(() => {
     setRun(selectedRef.current)
     setLogs("")
+    setRetrying(false)
     if (!selectedId || !open) return
     const events = new EventSource(`/api/runs/${selectedId}/events`)
     events.addEventListener("log", (event) => {
@@ -307,6 +395,11 @@ function RunDetail({ selected, open, onOpenChange, onUpdated }: { selected: Run 
       onUpdatedRef.current(updated)
       if (ACTIVE_STATES.has(updated.status)) return
       events.close()
+    })
+    events.addEventListener("progress", (event) => {
+      const updated = JSON.parse((event as MessageEvent).data) as Run
+      setRun(updated)
+      onUpdatedRef.current(updated)
     })
     return () => events.close()
   }, [selectedId, open])
@@ -323,13 +416,27 @@ function RunDetail({ selected, open, onOpenChange, onUpdated }: { selected: Run 
     }
   }
 
+  async function retry() {
+    if (!run) return
+    setRetrying(true)
+    try {
+      const retried = await api.retryRun(run.id)
+      toast.success("Evaluation restarted", { description: `${configuredModelLabel(retried.config.model_name)} · ${retried.id}` })
+      onRetried(retried)
+    } catch (error) {
+      toast.error("Could not retry evaluation", { description: error instanceof Error ? error.message : "Unknown error" })
+    } finally {
+      setRetrying(false)
+    }
+  }
+
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent>
         {run && <>
           <SheetHeader>
             <div className="mb-3 flex items-center gap-2"><StatusBadge status={run.status} /><span className="font-mono text-xs text-muted-foreground">{run.id}</span></div>
-            <SheetTitle>{run.config.model_name}</SheetTitle>
+            <SheetTitle>{configuredModelLabel(run.config.model_name)}</SheetTitle>
             <SheetDescription>{run.config.dataset_path} · {run.config.dataset}/{run.config.split}</SheetDescription>
           </SheetHeader>
           <div className="detail-scroll">
@@ -347,6 +454,9 @@ function RunDetail({ selected, open, onOpenChange, onUpdated }: { selected: Run 
                 <div><dt>Workers</dt><dd>{run.config.max_workers}</dd></div>
                 <div><dt>Mode</dt><dd>{run.config.streaming ? "Streaming" : "Static"}</dd></div>
                 <div><dt>Language</dt><dd>{run.config.language}</dd></div>
+                <div><dt>Using ASR</dt><dd>{countLabel(observedCounts(run, "actual_models"))}</dd></div>
+                {Object.keys(observedCounts(run, "detected_languages")).length > 0 && <div><dt>Detected languages</dt><dd>{countLabel(observedCounts(run, "detected_languages"))}</dd></div>}
+                {run.progress && <div><dt>Progress</dt><dd>{run.progress.completed_samples}/{run.progress.total_samples ?? "?"}</dd></div>}
                 <div><dt>Samples</dt><dd>{run.config.max_samples ?? "Full split"}</dd></div>
               </dl>
             </section>
@@ -363,7 +473,11 @@ function RunDetail({ selected, open, onOpenChange, onUpdated }: { selected: Run 
               <div className="artifact-list">{run.artifacts.map((artifact) => <a key={artifact} href={`/api/runs/${run.id}/artifacts/${artifact}`}><span>{artifact}</span><Download className="size-3.5" /></a>)}</div>
             </section>}
           </div>
-          {ACTIVE_STATES.has(run.status) && <div className="detail-footer"><Button variant="danger" onClick={cancel}><CircleStop className="size-4" />Cancel run</Button></div>}
+          <div className="detail-footer">
+            {ACTIVE_STATES.has(run.status)
+              ? <Button variant="danger" onClick={cancel}><CircleStop className="size-4" />Cancel run</Button>
+              : <Button onClick={retry} disabled={retrying}>{retrying ? <RefreshCw className="size-4 spin" /> : <RotateCcw className="size-4" />}{retrying ? "Starting…" : "Retry run"}</Button>}
+          </div>
         </>}
       </SheetContent>
     </Sheet>
@@ -436,14 +550,14 @@ export default function App() {
             <div className="hero-stats"><div><Activity /><span>Active</span><strong>{activeRuns.length}</strong></div><div><Clock3 /><span>History</span><strong>{completedRuns.length}</strong></div></div>
           </div>
 
-          {activeRuns.length > 0 && <div className="active-strip"><div className="pulse-orb" /><span>{activeRuns.length} evaluation{activeRuns.length === 1 ? " is" : "s are"} running in parallel</span><span className="active-models">{activeRuns.map((run) => run.config.model_name).join(" · ")}</span></div>}
+          {activeRuns.length > 0 && <div className="active-strip"><div className="pulse-orb" /><span>{activeRuns.length} evaluation{activeRuns.length === 1 ? " is" : "s are"} running in parallel</span><span className="active-models">{activeRuns.map((run) => `${configuredModelLabel(run.config.model_name)}: ${countLabel(observedCounts(run, "actual_models"))}`).join(" · ")}</span></div>}
 
           <div className="runs-heading"><div><h3>Run history</h3><p>Newest first · updates automatically</p></div><Button variant="outline" size="sm" onClick={refresh}><RefreshCw className="size-3.5" />Refresh</Button></div>
           <RunTable runs={runs} onSelect={(run) => { setSelected(run); setDetailOpen(true) }} />
         </section>
       </main>
 
-      <RunDetail selected={selected} open={detailOpen} onOpenChange={setDetailOpen} onUpdated={updateRun} />
+      <RunDetail selected={selected} open={detailOpen} onOpenChange={setDetailOpen} onUpdated={updateRun} onRetried={(retried) => { setRuns((current) => [retried, ...current]); setSelected(retried) }} />
     </div>
   )
 }

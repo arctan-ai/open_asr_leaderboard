@@ -7,7 +7,7 @@ from typing import Optional
 
 import requests
 
-from . import APIProvider, PermanentError, register
+from . import APIProvider, PermanentError, ProviderTranscription, register
 from .streaming_utils import build_query_url, connect_websocket
 
 
@@ -52,7 +52,7 @@ async def _transcribe_streaming(
     api_key: str,
     model: str,
     language: str,
-) -> str:
+) -> ProviderTranscription:
     params = {
         "model": model,
         "language-code": _language_code(language),
@@ -60,6 +60,7 @@ async def _transcribe_streaming(
         "sample_rate": str(SAMPLE_RATE),
     }
     transcript = ""
+    detected_language = None
 
     async with connect_websocket(
         build_query_url(SARVAM_STREAMING_ENDPOINT, params),
@@ -82,7 +83,7 @@ async def _transcribe_streaming(
         await ws.send(json.dumps({"type": "flush"}))
 
         async def receive_messages() -> None:
-            nonlocal transcript
+            nonlocal transcript, detected_language
             async for raw in ws:
                 try:
                     message = json.loads(raw)
@@ -93,6 +94,12 @@ async def _transcribe_streaming(
                 data = message.get("data") or {}
                 if message_type == "data":
                     next_transcript = data.get("transcript", "")
+                    detected_language = (
+                        data.get("language_code")
+                        or data.get("language-code")
+                        or message.get("language_code")
+                        or message.get("language-code")
+                    )
                     if next_transcript:
                         transcript = next_transcript
                         return
@@ -108,7 +115,11 @@ async def _transcribe_streaming(
                 f"Sarvam streaming response timed out after {STREAMING_TIMEOUT_S}s"
             ) from exc
 
-    return " ".join(transcript.split())
+    return ProviderTranscription(
+        text=" ".join(transcript.split()),
+        actual_model=f"sarvam/{model}",
+        detected_languages=(str(detected_language),) if detected_language else (),
+    )
 
 
 @register("sarvam")
@@ -121,7 +132,7 @@ class SarvamProvider(APIProvider):
         use_url: bool = False,
         language: str = "en",
         prompt: Optional[str] = None,
-    ) -> str:
+    ) -> ProviderTranscription:
         if use_url:
             raise PermanentError(
                 "Sarvam provider requires local audio; do not use --use_url"
@@ -156,7 +167,13 @@ class SarvamProvider(APIProvider):
             )
 
         _raise_for_response(response)
-        return response.json().get("transcript", "") or "."
+        data = response.json()
+        detected_language = data.get("language_code")
+        return ProviderTranscription(
+            text=data.get("transcript", "") or "",
+            actual_model=f"sarvam/{model}",
+            detected_languages=(str(detected_language),) if detected_language else (),
+        )
 
     def transcribe_streaming(
         self,
@@ -166,7 +183,7 @@ class SarvamProvider(APIProvider):
         use_url: bool = False,
         language: str = "en",
         prompt: Optional[str] = None,
-    ) -> str:
+    ) -> ProviderTranscription:
         if use_url:
             raise PermanentError(
                 "Sarvam streaming provider requires local audio; do not use --use_url"
@@ -188,14 +205,11 @@ class SarvamProvider(APIProvider):
             raise ValueError("SARVAM_API_KEY environment variable not set")
 
         model = _validate_model(model_variant)
-        return (
-            asyncio.run(
-                _transcribe_streaming(
-                    audio_file_path=audio_file_path,
-                    api_key=api_key,
-                    model=model,
-                    language=language,
-                )
+        return asyncio.run(
+            _transcribe_streaming(
+                audio_file_path=audio_file_path,
+                api_key=api_key,
+                model=model,
+                language=language,
             )
-            or "."
         )
