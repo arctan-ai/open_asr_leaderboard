@@ -113,8 +113,25 @@ sudo install -m 0644 \
   deploy/open-asr-console.service \
   /etc/systemd/system/open-asr-console.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now open-asr-console.service
-sudo systemctl status open-asr-console.service
+sudo systemctl enable open-asr-console.service
+sudo systemctl restart open-asr-console.service
+sudo systemctl status open-asr-console.service --no-pager
+curl --fail --silent --show-error http://127.0.0.1:8080/api/health
+curl --fail --silent --show-error http://127.0.0.1:8080/api/options
+```
+
+Always restart the service after deploying backend code. `systemctl enable --now`
+does not restart a service that is already running, so using it by itself can leave
+an old Python process serving an API that is incompatible with the newly copied
+frontend. A restart interrupts active evaluations; check the active-run count in
+`/api/health` before restarting when the console is in use.
+
+The two `curl` checks must succeed before opening the UI. If the service has only
+just started and the first request is refused, wait a second and retry. If either
+endpoint continues to fail, inspect the current startup logs with:
+
+```bash
+sudo journalctl -u open-asr-console.service -n 100 --no-pager
 ```
 
 Access it from your machine through an SSH tunnel:
@@ -124,5 +141,9 @@ ssh -L 8080:127.0.0.1:8080 livekit-server
 ```
 
 Then open `http://127.0.0.1:8080`.
+
+After a deployment, hard-refresh the page (`Ctrl+Shift+R` on Linux/Windows or
+`Cmd+Shift+R` on macOS) so the browser loads the new hashed JavaScript and CSS
+assets.
 
 Do not bind the service publicly for this MVP. It does not include public authentication or TLS termination.

@@ -10,6 +10,8 @@ dependencies = [
     "dotenv>=0.9.9",
     "elevenlabs>=2.57.0",
     "evaluate>=0.4.6",
+    "fastapi>=0.116.0",
+    "httpx>=0.28.1",
     "jiwer>=4.0.0",
     "kaldialign>=0.12.0",
     "librosa>=0.11.0",
@@ -20,11 +22,13 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "requests-toolbelt>=1.0.0",
     "rev-ai>=2.21.0",
+    "silero-vad>=6.2.0",
     "soundfile>=0.14.0",
     "speechmatics-python>=5.0.0.post1",
     "torch>=2.12.1",
     "torchcodec>=0.14.0",
     "transformers>=5.13.0",
+    "uvicorn[standard]>=0.35.0",
     "websockets>=16.0",
 ]
 
