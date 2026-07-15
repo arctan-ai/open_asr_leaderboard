@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import asyncio
 import json
 import os
@@ -20,6 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
+from api.dataset_catalog import dataset_catalog, source_options
 from api.language_catalog import MODEL_LANGUAGES, effective_mode, language_options
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -91,6 +91,7 @@ def env_configured(name: str) -> bool:
 
 
 class RunCreate(BaseModel):
+    dataset_source: Literal["huggingface", "local"] = "huggingface"
     dataset_path: str = Field(min_length=1, max_length=300)
     dataset: str = Field(default="default", min_length=1, max_length=200)
     split: str = Field(default="test", min_length=1, max_length=200)
@@ -140,7 +141,21 @@ class RunCreate(BaseModel):
                 f"Unsupported language '{self.language}' for {self.model_name} "
                 f"in {mode} mode. Allowed values: {', '.join(sorted(supported_codes))}"
             )
+        if self.dataset_source == "local":
+            relative = Path(self.dataset_path)
+            if (
+                relative.is_absolute()
+                or len(relative.parts) != 1
+                or relative.name.startswith(".")
+            ):
+                raise ValueError("Local dataset path must name an immediate child directory")
+            if self.dataset != "default" or self.split != "test":
+                raise ValueError(
+                    "Local datasets expose only config 'default' and split 'test'"
+                )
         forced_streaming = self.model_name == "soniox/stt-rt-v5"
+        if self.dataset_source == "local" and self.use_url:
+            raise ValueError("Local datasets cannot be combined with URL mode")
         if self.use_url and (self.streaming or forced_streaming):
             raise ValueError("URL mode cannot be combined with streaming")
         if self.use_url and prefix == "sarvam":
@@ -310,6 +325,8 @@ class RunManager:
             sys.executable,
             "-u",
             str(self.runner_path),
+            "--dataset_source",
+            request.dataset_source,
             "--dataset_path",
             request.dataset_path,
             "--dataset",
@@ -481,10 +498,12 @@ def options_payload() -> dict:
         "providers": providers,
         "preprocessors": PREPROCESSORS,
         "vad_positions": VAD_POSITIONS,
+        "dataset_sources": source_options(),
         "credentials": {
             name: env_configured(name) for name in sorted(credential_names)
         },
         "defaults": {
+            "dataset_source": "huggingface",
             "model_name": "deepgram/nova-3",
             "dataset": "default",
             "split": "test",
@@ -517,6 +536,18 @@ def create_app(
     @app.get("/api/options")
     def options():
         return options_payload()
+
+    @app.get("/api/datasets")
+    async def list_datasets(source_id: str):
+        try:
+            return await asyncio.to_thread(dataset_catalog, source_id)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404, detail="Dataset source not found"
+            ) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
 
     @app.post("/api/datasets/inspect")
     async def inspect_dataset(request: DatasetInspect):

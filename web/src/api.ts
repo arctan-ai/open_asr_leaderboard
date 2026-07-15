@@ -8,19 +8,42 @@ export type Provider = {
   }>
   configured: boolean
 }
-
 export type LanguageOption = { code: string; label: string }
+
+export type DatasetSource = {
+  id: "huggingface" | "local"
+  label: string
+  kind: "huggingface" | "local"
+  description: string
+}
+
+export type DatasetOption = {
+  id: string
+  label: string
+  dataset_source: "huggingface" | "local"
+  dataset_path: string
+  dataset: string
+  splits: string[]
+  features: string[]
+  valid: boolean
+  error: string | null
+}
+
+export type DatasetCatalog = { source_id: string; datasets: DatasetOption[] }
+
 
 export type Options = {
   providers: Provider[]
   preprocessors: string[]
   vad_positions: string[]
+  dataset_sources: DatasetSource[]
   credentials: Record<string, boolean>
-  defaults: { model_name: string; dataset: string; split: string; max_workers: number }
+  defaults: { dataset_source: "huggingface" | "local"; model_name: string; dataset: string; split: string; max_workers: number }
 }
 
 export type RunConfig = {
   dataset_path: string
+  dataset_source: "huggingface" | "local"
   dataset: string
   split: string
   model_name: string
@@ -76,4 +99,5 @@ export const api = {
   createRun: (config: RunConfig) => request<Run>("/api/runs", { method: "POST", body: JSON.stringify(config) }),
   cancelRun: (id: string) => request<Run>(`/api/runs/${id}/cancel`, { method: "POST" }),
   inspectDataset: (dataset_path: string) => request<{ dataset_path: string; configs: { name: string; splits: string[]; features: string[]; schema?: Record<string, unknown> }[] }>("/api/datasets/inspect", { method: "POST", body: JSON.stringify({ dataset_path }) }),
+  datasets: (source_id: string) => request<DatasetCatalog>(`/api/datasets?source_id=${encodeURIComponent(source_id)}`),
 }

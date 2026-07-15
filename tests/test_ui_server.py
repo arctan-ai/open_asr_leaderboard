@@ -86,10 +86,19 @@ class UiServerTest(unittest.TestCase):
         rendered = json.dumps(payload)
         self.assertNotIn("secret-value", rendered)
         self.assertTrue(payload["credentials"]["DEEPGRAM_API_KEY"])
+        self.assertEqual(payload["defaults"]["dataset_source"], "huggingface")
+        self.assertEqual(
+            [source["id"] for source in payload["dataset_sources"]],
+            ["huggingface", "local"],
+        )
 
     def test_validation_rejects_incompatible_url_mode(self):
         with self.assertRaisesRegex(ValueError, "URL mode"):
             self.request(use_url=True, audio_preprocessor="arctan")
+        with self.assertRaisesRegex(ValueError, "Local datasets"):
+            self.request(dataset_source="local", dataset_path="Valid", use_url=True)
+        with self.assertRaisesRegex(ValueError, "immediate child"):
+            self.request(dataset_source="local", dataset_path="../outside")
         with self.assertRaisesRegex(ValueError, "URL mode"):
             self.request(
                 model_name="soniox/stt-rt-v5",
@@ -118,6 +127,10 @@ class UiServerTest(unittest.TestCase):
         self.assertEqual(command[command.index("--output_dir") + 1], str(output))
         self.assertEqual(command[command.index("--language") + 1], "multi")
         self.assertNotIn("sh", command[:2])
+
+        self.assertEqual(
+            command[command.index("--dataset_source") + 1], "huggingface"
+        )
 
     def test_sarvam_is_exposed_with_credential_status(self):
         with mock.patch.dict(os.environ, {"SARVAM_API_KEY": "configured"}, clear=True):
@@ -198,6 +211,29 @@ class UiServerTest(unittest.TestCase):
 
         restarted = RunStore(self.root / "runs")
         self.assertEqual(restarted.get("stale")["status"], "interrupted")
+
+    def test_dataset_catalog_endpoint_returns_source_payload(self):
+        app = create_app(
+            results_root=self.root / "catalog-runs",
+            runner_path=self.runner,
+            web_dist=self.root / "missing-dist",
+        )
+        expected = {"source_id": "local", "datasets": []}
+        with mock.patch("api.ui_server.dataset_catalog", return_value=expected):
+            response = TestClient(app).get("/api/datasets?source_id=local")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), expected)
+
+    def test_dataset_catalog_endpoint_rejects_unknown_source(self):
+        app = create_app(
+            results_root=self.root / "unknown-source-runs",
+            runner_path=self.runner,
+            web_dist=self.root / "missing-dist",
+        )
+        response = TestClient(app).get("/api/datasets?source_id=unknown")
+
+        self.assertEqual(response.status_code, 404)
 
     def test_api_rejects_artifact_path_traversal(self):
         app = create_app(

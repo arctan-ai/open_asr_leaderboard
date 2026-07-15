@@ -8,7 +8,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-import datasets
 import evaluate
 import soundfile as sf
 import tempfile
@@ -19,6 +18,7 @@ import itertools
 from tqdm import tqdm
 from dotenv import load_dotenv
 from normalizer import data_utils
+from api.dataset_catalog import load_evaluation_dataset
 import concurrent.futures
 import threading
 from datetime import datetime, timezone
@@ -142,9 +142,12 @@ def transcribe_dataset(
     prompt=None,
     args=None,
     output_dir="./results",
+    dataset_source="huggingface",
 ):
     started_at = datetime.now(timezone.utc).isoformat()
     effective_streaming = effective_streaming_for_model(model_name, streaming)
+    if dataset_source == "local" and use_url:
+        raise ValueError("Local datasets cannot be combined with URL mode")
     if effective_streaming and use_url:
         raise ValueError("--streaming requires local audio; do not use --use_url")
 
@@ -160,7 +163,12 @@ def transcribe_dataset(
             audio_rows = itertools.islice(audio_rows, max_samples)
         ds = audio_rows
     else:
-        ds = datasets.load_dataset(dataset_path, dataset, split=split, streaming=False)
+        ds = load_evaluation_dataset(
+            dataset_source=dataset_source,
+            dataset_path=dataset_path,
+            dataset=dataset,
+            split=split,
+        )
         if max_samples:
             ds = ds.select(range(min(max_samples, len(ds))))
         ds = data_utils.prepare_data(ds, args=args)
@@ -307,6 +315,7 @@ def transcribe_dataset(
         "started_at": started_at,
         "finished_at": datetime.now(timezone.utc).isoformat(),
         "model_name": model_name,
+        "dataset_source": dataset_source,
         "dataset_path": dataset_path,
         "dataset": dataset,
         "split": split,
@@ -331,6 +340,12 @@ def transcribe_dataset(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Unified Transcription Script with Concurrency"
+    )
+    parser.add_argument(
+        "--dataset_source",
+        choices=("huggingface", "local"),
+        default="huggingface",
+        help="Dataset source adapter. Existing callers default to Hugging Face.",
     )
     parser.add_argument("--dataset_path", required=True)
     parser.add_argument("--dataset", required=True)
@@ -376,6 +391,8 @@ if __name__ == "__main__":
     effective_streaming = effective_streaming_for_model(args.model_name, args.streaming)
     if effective_streaming and args.use_url:
         parser.error("--streaming requires local audio; do not use --use_url")
+    if args.dataset_source == "local" and args.use_url:
+        parser.error("Local datasets cannot be combined with URL mode")
     if args.use_url and args.audio_preprocessor != "none":
         parser.error("--audio_preprocessor requires local audio; do not use --use_url")
     if args.use_url and args.vad_position != "none":
@@ -406,6 +423,7 @@ if __name__ == "__main__":
             prompt=args.prompt,
             args=args,
             output_dir=args.output_dir,
+            dataset_source=args.dataset_source,
         )
     except Exception as exc:
         output_path = Path(args.output_dir)
@@ -418,6 +436,7 @@ if __name__ == "__main__":
                     "model_name": args.model_name,
                     "dataset_path": args.dataset_path,
                     "dataset": args.dataset,
+                    "dataset_source": args.dataset_source,
                     "split": args.split,
                     "language": args.language,
                     "audio_preprocessor": args.audio_preprocessor,
