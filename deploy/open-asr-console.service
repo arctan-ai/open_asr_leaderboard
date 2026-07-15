@@ -1,0 +1,20 @@
+[Unit]
+Description=Open ASR Evaluation Console
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/open_asr_leaderboard
+EnvironmentFile=/home/ubuntu/open_asr_leaderboard/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/open_asr_leaderboard/.venv/bin/uvicorn api.ui_server:app --host 127.0.0.1 --port 8080
+Restart=on-failure
+RestartSec=3
+KillMode=mixed
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

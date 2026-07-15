@@ -1,4 +1,5 @@
 import argparse
+import json
 from typing import Optional
 import datasets
 import evaluate
@@ -12,6 +13,8 @@ from tqdm import tqdm
 from dotenv import load_dotenv
 from normalizer import data_utils
 import concurrent.futures
+from datetime import datetime, timezone
+from pathlib import Path
 from providers import get_provider, PermanentError
 
 load_dotenv()
@@ -121,7 +124,9 @@ def transcribe_dataset(
     max_workers=4,
     prompt=None,
     args=None,
+    output_dir="./results",
 ):
+    started_at = datetime.now(timezone.utc).isoformat()
     effective_streaming = effective_streaming_for_model(model_name, streaming)
     if effective_streaming and use_url:
         raise ValueError("--streaming requires local audio; do not use --use_url")
@@ -231,6 +236,7 @@ def transcribe_dataset(
         split,
         audio_length=results["audio_length_s"],
         transcription_time=results["transcription_time_s"],
+        basedir=output_dir,
     )
 
     print("Results saved at path:", manifest_path)
@@ -259,6 +265,29 @@ def transcribe_dataset(
         vad_position=getattr(args, "vad_position", "none"),
         streaming=effective_streaming,
     )
+    summary = {
+        "status": "completed",
+        "started_at": started_at,
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+        "model_name": model_name,
+        "dataset_path": dataset_path,
+        "dataset": dataset,
+        "split": split,
+        "audio_preprocessor": getattr(args, "audio_preprocessor", "none"),
+        "vad_position": getattr(args, "vad_position", "none"),
+        "streaming": effective_streaming,
+        "use_url": use_url,
+        "num_samples": len(results["references"]),
+        "wer_percent": wer_percent,
+        "rtfx": rtfx,
+        "manifest_path": str(Path(manifest_path).resolve()),
+    }
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    (output_path / "summary.json").write_text(
+        json.dumps(summary, indent=2) + "\n", encoding="utf-8"
+    )
+    return summary
 
 
 if __name__ == "__main__":
@@ -274,6 +303,11 @@ if __name__ == "__main__":
         help="Prefix model name with provider prefix (e.g., 'assembly/', 'smallestai/', 'soniox/', or 'deepgram/')",
     )
     parser.add_argument("--max_samples", type=int, default=None)
+    parser.add_argument(
+        "--output_dir",
+        default="./results",
+        help="Directory for the manifest and structured summary.json output.",
+    )
     parser.add_argument(
         "--max_workers", type=int, default=300, help="Number of concurrent threads"
     )
@@ -327,8 +361,31 @@ if __name__ == "__main__":
             max_workers=args.max_workers,
             prompt=args.prompt,
             args=args,
+            output_dir=args.output_dir,
         )
     except Exception as exc:
+        output_path = Path(args.output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        (output_path / "summary.json").write_text(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "finished_at": datetime.now(timezone.utc).isoformat(),
+                    "model_name": args.model_name,
+                    "dataset_path": args.dataset_path,
+                    "dataset": args.dataset,
+                    "split": args.split,
+                    "audio_preprocessor": args.audio_preprocessor,
+                    "vad_position": args.vad_position,
+                    "streaming": effective_streaming,
+                    "use_url": args.use_url,
+                    "error": str(exc),
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         data_utils.post_slack_run_failed(
             model_name=args.model_name,
             dataset_path=args.dataset_path,
