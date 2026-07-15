@@ -29,6 +29,13 @@ args, _ = parser.parse_known_args()
 output = Path(args.output_dir)
 output.mkdir(parents=True, exist_ok=True)
 print('loading dataset', flush=True)
+progress = {
+    'completed_samples': 1,
+    'total_samples': 1,
+    'actual_models': {'deepgram/nova-3': 1},
+    'detected_languages': {'en': 1},
+}
+(output / 'progress.json').write_text(json.dumps(progress))
 if 'slow' in (args.dataset_path or ''):
     time.sleep(30)
 (output / 'manifest.jsonl').write_text('{"text": "hello"}\\n')
@@ -156,6 +163,22 @@ class UiServerTest(unittest.TestCase):
         self.assertIn("multi", deepgram_codes)
         self.assertIn("en-IN", deepgram_codes)
 
+    def test_assembly_uses_stable_alias_and_documented_languages(self):
+        payload = options_payload()
+        assembly = next(
+            provider
+            for provider in payload["providers"]
+            if provider["prefix"] == "assembly"
+        )
+        self.assertEqual(assembly["models"], ["universal-stt"])
+        codes = {
+            option["code"]
+            for option in assembly["language_options"]["universal-stt"]["batch"]
+        }
+        self.assertEqual(len(codes - {"unknown"}), 18)
+        self.assertIn("hi", codes)
+        self.assertIn("vi", codes)
+
     def test_validation_rejects_unsupported_language_and_model_mode(self):
         with self.assertRaisesRegex(ValueError, "Unsupported language 'xx'"):
             self.request(language="xx")
@@ -180,6 +203,7 @@ class UiServerTest(unittest.TestCase):
         completed = wait_for(self.store, run["id"], {"completed"})
 
         self.assertEqual(completed["summary"]["wer_percent"], 12.5)
+        self.assertEqual(completed["progress"]["actual_models"], {"deepgram/nova-3": 1})
         self.assertIn("manifest.jsonl", completed["artifacts"])
         self.assertIn("run.log", completed["artifacts"])
 
@@ -259,6 +283,8 @@ class UiServerTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("event: log", response.text)
+        self.assertIn("event: progress", response.text)
+        self.assertIn('"deepgram/nova-3": 1', response.text)
         self.assertIn("loading dataset", response.text)
         self.assertIn('"status": "completed"', response.text)
 

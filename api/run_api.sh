@@ -25,7 +25,7 @@ RESULTS_BUCKET="${RESULTS_BUCKET:-}"
 # Streaming examples, run directly when needed:
 # python run_eval.py --dataset_path="$DATASET_PATH" --dataset=ami --split=test --model_name deepgram/nova-3 --max_workers=16 --streaming
 # python run_eval.py --dataset_path="$DATASET_PATH" --dataset=ami --split=test --model_name soniox/stt-async-v5 --max_workers=16 --streaming
-# python run_eval.py --dataset_path="$DATASET_PATH" --dataset=ami --split=test --model_name assembly/universal-3-pro --max_workers=4 --streaming
+# python run_eval.py --dataset_path="$DATASET_PATH" --dataset=ami --split=test --model_name assembly/universal-stt --max_workers=4 --streaming
 # python run_eval.py --dataset_path="$DATASET_PATH" --dataset=ami --split=test --model_name sarvam/saaras:v3 --language en-IN --max_workers=4
 # python run_eval.py --dataset_path="$DATASET_PATH" --dataset=ami --split=test --model_name sarvam/saaras:v3 --language en-IN --max_workers=4 --streaming
 # python run_eval.py --dataset_path="$DATASET_PATH" --dataset=ami --split=test --model_name sarvam/saaras:v3 --language unknown --max_workers=4 --streaming
@@ -33,7 +33,7 @@ MODEL_CONFIGS=(
     # "openai/gpt-4o-transcribe      false  16"
     # "openai/gpt-4o-mini-transcribe false  16"
     # "openai/whisper-1              false  16"
-    # "assembly/universal-3-pro      false  4"
+    # "assembly/universal-stt       false  4"
     # "elevenlabs/scribe_v1          false  16"
     # "revai/machine                 false  4"
     # "revai/fusion                  false  4"

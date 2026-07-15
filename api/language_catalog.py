@@ -63,8 +63,14 @@ def options(codes: list[str], *special: dict[str, str]) -> list[dict[str, str]]:
     return [*special, *({"code": code, "label": LANGUAGE_NAMES[code]} for code in codes)]
 
 
-# https://www.assemblyai.com/docs/getting-started/models
-ASSEMBLY_U3 = options(["en", "es", "de", "fr", "pt", "it"], AUTO)
+# https://www.assemblyai.com/docs/pre-recorded-audio/supported-languages
+ASSEMBLY_U3 = options(
+    [
+        "ar", "zh", "da", "nl", "en", "fi", "fr", "de", "he", "hi",
+        "it", "ja", "no", "pt", "es", "sv", "tr", "vi",
+    ],
+    AUTO,
+)
 
 # https://docs.cartesia.ai/api-reference/stt/transcribe
 CARTESIA_WHISPER_CODES = [
@@ -140,7 +146,7 @@ SONIOX_CODES = [
 
 
 MODEL_LANGUAGES = {
-    "assembly/universal-3-pro": {
+    "assembly/universal-stt": {
         "batch": ASSEMBLY_U3,
         "streaming": [AUTO],
     },

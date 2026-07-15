@@ -64,6 +64,15 @@ export type RunSummary = {
   rtfx?: number
   num_samples?: number
   error?: string
+  actual_models?: Record<string, number>
+  detected_languages?: Record<string, number>
+}
+
+export type RunProgress = {
+  completed_samples: number
+  total_samples: number | null
+  actual_models: Record<string, number>
+  detected_languages: Record<string, number>
 }
 
 export type Run = {
@@ -75,6 +84,7 @@ export type Run = {
   output_dir: string
   config: RunConfig
   summary: RunSummary | null
+  progress: RunProgress | null
   error: string | null
   artifacts: string[]
 }
