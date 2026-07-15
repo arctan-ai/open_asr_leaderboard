@@ -17,6 +17,7 @@ DEFAULT_MODEL = "saaras:v3"
 SAMPLE_RATE = 16000
 STREAMING_CHUNK_BYTES = 4096
 STREAMING_TIMEOUT_S = 30
+STREAMING_IDLE_TIMEOUT_S = 2
 STATIC_MAX_DURATION_S = 30
 
 
@@ -59,7 +60,7 @@ async def _transcribe_streaming(
         "mode": "transcribe",
         "sample_rate": str(SAMPLE_RATE),
     }
-    transcript = ""
+    transcript_segments = []
     detected_language = None
 
     async with connect_websocket(
@@ -83,8 +84,23 @@ async def _transcribe_streaming(
         await ws.send(json.dumps({"type": "flush"}))
 
         async def receive_messages() -> None:
-            nonlocal transcript, detected_language
-            async for raw in ws:
+            nonlocal detected_language
+            messages = ws.__aiter__()
+            while True:
+                timeout = (
+                    STREAMING_IDLE_TIMEOUT_S
+                    if transcript_segments
+                    else STREAMING_TIMEOUT_S
+                )
+                try:
+                    raw = await asyncio.wait_for(messages.__anext__(), timeout=timeout)
+                except StopAsyncIteration:
+                    return
+                except TimeoutError:
+                    if transcript_segments:
+                        return
+                    raise
+
                 try:
                     message = json.loads(raw)
                 except json.JSONDecodeError:
@@ -101,22 +117,21 @@ async def _transcribe_streaming(
                         or message.get("language-code")
                     )
                     if next_transcript:
-                        transcript = next_transcript
-                        return
+                        transcript_segments.append(next_transcript)
                 elif message_type == "error":
                     raise PermanentError(
                         f"Sarvam streaming error: {data.get('error', 'unknown')}"
                     )
 
         try:
-            await asyncio.wait_for(receive_messages(), timeout=STREAMING_TIMEOUT_S)
+            await receive_messages()
         except TimeoutError as exc:
             raise TimeoutError(
                 f"Sarvam streaming response timed out after {STREAMING_TIMEOUT_S}s"
             ) from exc
 
     return ProviderTranscription(
-        text=" ".join(transcript.split()),
+        text=" ".join(" ".join(transcript_segments).split()),
         actual_model=f"sarvam/{model}",
         detected_languages=(str(detected_language),) if detected_language else (),
     )

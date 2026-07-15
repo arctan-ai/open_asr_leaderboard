@@ -887,7 +887,10 @@ class StreamingProviderTest(unittest.TestCase):
         from providers import sarvam_provider
 
         fake_ws = FakeWebSocket(
-            [json.dumps({"type": "data", "data": {"transcript": "hello world"}})]
+            [
+                json.dumps({"type": "data", "data": {"transcript": "hello"}}),
+                json.dumps({"type": "data", "data": {"transcript": "world"}}),
+            ]
         )
         audio = b"wav-bytes"
         with tempfile.NamedTemporaryFile(suffix=".wav") as audio_file:

@@ -174,7 +174,12 @@ class DatasetCatalogTest(unittest.TestCase):
         self.assertIs(loaded, fake)
         self.assertEqual(
             fake.mapped,
-            {"audio": str(dataset_dir / "audio" / "sample.wav")},
+            {
+                "audio": {
+                    "path": str(dataset_dir / "audio" / "sample.wav"),
+                    "bytes": None,
+                }
+            },
         )
         load_dataset.assert_called_once_with(
             "csv",
