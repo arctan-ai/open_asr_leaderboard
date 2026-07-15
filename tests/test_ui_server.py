@@ -98,6 +98,7 @@ class UiServerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Sarvam requires local audio"):
             self.request(
                 model_name="sarvam/saaras:v3",
+                language="unknown",
                 use_url=True,
                 audio_preprocessor="none",
             )
@@ -108,14 +109,14 @@ class UiServerTest(unittest.TestCase):
 
     def test_command_is_an_argument_list_and_uses_unique_output(self):
         request = self.request(
-            dataset_path="dataset; touch /tmp/not-run", language="unknown"
+            dataset_path="dataset; touch /tmp/not-run", language="multi"
         )
         output = self.root / "isolated"
         command = self.manager.build_command(request, output)
 
         self.assertIn("dataset; touch /tmp/not-run", command)
         self.assertEqual(command[command.index("--output_dir") + 1], str(output))
-        self.assertEqual(command[command.index("--language") + 1], "unknown")
+        self.assertEqual(command[command.index("--language") + 1], "multi")
         self.assertNotIn("sh", command[:2])
 
     def test_sarvam_is_exposed_with_credential_status(self):
@@ -126,8 +127,39 @@ class UiServerTest(unittest.TestCase):
             provider for provider in payload["providers"] if provider["prefix"] == "sarvam"
         )
         self.assertEqual(sarvam["models"], ["saaras:v3"])
+        self.assertIn(
+            {"code": "unknown", "label": "Automatic detection"},
+            sarvam["language_options"]["saaras:v3"]["streaming"],
+        )
         self.assertTrue(sarvam["configured"])
         self.assertTrue(payload["credentials"]["SARVAM_API_KEY"])
+        deepgram = next(
+            provider for provider in payload["providers"] if provider["prefix"] == "deepgram"
+        )
+        deepgram_codes = {
+            option["code"]
+            for option in deepgram["language_options"]["nova-3"]["streaming"]
+        }
+        self.assertIn("multi", deepgram_codes)
+        self.assertIn("en-IN", deepgram_codes)
+
+    def test_validation_rejects_unsupported_language_and_model_mode(self):
+        with self.assertRaisesRegex(ValueError, "Unsupported language 'xx'"):
+            self.request(language="xx")
+        with self.assertRaisesRegex(ValueError, "does not support streaming"):
+            self.request(model_name="cartesia/ink-whisper", streaming=True)
+        with self.assertRaisesRegex(ValueError, "does not support batch"):
+            self.request(model_name="cartesia/ink-2")
+
+    def test_validation_uses_forced_streaming_language_options(self):
+        request = self.request(
+            model_name="soniox/stt-rt-v5",
+            language="unknown",
+        )
+        self.assertEqual(request.language, "unknown")
+
+        with self.assertRaisesRegex(ValueError, "Unsupported language 'xx'"):
+            self.request(model_name="soniox/stt-rt-v5", language="xx")
 
     def test_completed_run_persists_summary_and_artifacts(self):
         with mock.patch.dict(os.environ, {"DEEPGRAM_API_KEY": "configured"}):

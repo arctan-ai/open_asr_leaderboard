@@ -64,13 +64,15 @@ def _create_transcription(
     file_id: str,
     language: str,
 ) -> str:
+    payload = {
+        "model": model,
+        "file_id": file_id,
+    }
+    if language != "unknown":
+        payload["language_hints"] = [language]
     response = session.post(
         f"{SONIOX_API_BASE_URL}/v1/transcriptions",
-        json={
-            "model": model,
-            "language_hints": [language],
-            "file_id": file_id,
-        },
+        json=payload,
         timeout=60,
     )
     _raise_for_permanent_client_error(response)
@@ -121,8 +123,9 @@ async def _transcribe_streaming(
         "audio_format": "pcm_s16le",
         "sample_rate": 16000,
         "num_channels": 1,
-        "language_hints": [language],
     }
+    if language != "unknown":
+        config["language_hints"] = [language]
     final_text_parts = []
 
     async with connect_websocket(SONIOX_STREAMING_ENDPOINT) as ws:

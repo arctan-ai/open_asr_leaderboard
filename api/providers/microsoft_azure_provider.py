@@ -89,15 +89,16 @@ class MicrosoftAzureProvider(APIProvider):
         if not api_key or api_key == "your_api_key":
             raise ValueError("AZURE_API_KEY environment variable not set")
 
-        locale = self.LOCALE_DICT.get(language, "")
+        locale = self.LOCALE_DICT.get(language, language)
         definition = {
-            "locales": [locale],
             "profanityFilterMode": "None",
             "enhancedMode": {
                 "enabled": True,
                 "task": "transcribe",
             },
         }
+        if language != "unknown" and locale:
+            definition["locales"] = [locale]
         if prompt is not None:
             # E.g., prompt = "Output must be in lexical format."
             definition["enhancedMode"]["prompt"] = [prompt]
@@ -184,7 +185,7 @@ class MicrosoftAzureProvider(APIProvider):
             endpoint=endpoint,
         )
         locale = self.LOCALE_DICT.get(language, language)
-        if locale:
+        if language != "unknown" and locale:
             speech_config.speech_recognition_language = locale
 
         stream_format = speechsdk.audio.AudioStreamFormat(

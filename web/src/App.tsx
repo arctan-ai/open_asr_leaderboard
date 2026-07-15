@@ -31,19 +31,6 @@ import { Switch } from "@/components/ui/switch"
 
 const ACTIVE_STATES = new Set(["queued", "running", "cancelling"])
 
-const LANGUAGE_OPTIONS = [
-  ["en", "English (en-IN)"],
-  ["unknown", "Automatic detection"],
-  ["hi-IN", "Hindi"], ["as-IN", "Assamese"], ["bn-IN", "Bengali"],
-  ["ur-IN", "Urdu"], ["kn-IN", "Kannada"], ["ne-IN", "Nepali"],
-  ["ml-IN", "Malayalam"], ["kok-IN", "Konkani"], ["mr-IN", "Marathi"],
-  ["ks-IN", "Kashmiri"], ["od-IN", "Odia"], ["sd-IN", "Sindhi"],
-  ["pa-IN", "Punjabi"], ["sa-IN", "Sanskrit"], ["ta-IN", "Tamil"],
-  ["sat-IN", "Santali"], ["te-IN", "Telugu"], ["mni-IN", "Manipuri"],
-  ["brx-IN", "Bodo"], ["gu-IN", "Gujarati"], ["mai-IN", "Maithili"],
-  ["doi-IN", "Dogri"],
-] as const
-
 const DEFAULT_CONFIG: RunConfig = {
   dataset_path: "bettercallaaryan/nc_agent_clips_openasr",
   dataset: "default",
@@ -114,6 +101,13 @@ function RunComposer({ options, activeCount, onCreated }: { options: Options; ac
   const provider = options.providers.find((item) => config.model_name.startsWith(`${item.prefix}/`))
   const isSarvam = config.model_name.startsWith("sarvam/")
   const forcedStreaming = config.model_name === "soniox/stt-rt-v5"
+  const effectiveStreaming = config.streaming || forcedStreaming
+  const modelVariant = config.model_name.split("/", 2)[1]
+  const languageOptions = useMemo(
+    () => provider?.language_options[modelVariant]?.[effectiveStreaming ? "streaming" : "batch"] ?? [],
+    [effectiveStreaming, modelVariant, provider],
+  )
+  const unsupportedMode = languageOptions.length === 0
   const providerRequiresLocal = isSarvam
   const localTransforms = config.streaming || forcedStreaming || providerRequiresLocal || config.audio_preprocessor !== "none" || config.vad_position !== "none"
   const preprocessorCredentials: Record<string, string[]> = {
@@ -123,6 +117,12 @@ function RunComposer({ options, activeCount, onCreated }: { options: Options; ac
   }
   const missingPreprocessorCredential = (preprocessorCredentials[config.audio_preprocessor] || []).find((name) => !options.credentials[name])
   const missingCredential = !provider?.configured || Boolean(missingPreprocessorCredential)
+
+  useEffect(() => {
+    if (!languageOptions.length) return
+    if (languageOptions.some((option) => option.code === config.language)) return
+    setConfig((current) => ({ ...current, language: languageOptions[0].code }))
+  }, [config.language, languageOptions])
 
   function update<K extends keyof RunConfig>(key: K, value: RunConfig[K]) {
     setConfig((current) => ({ ...current, [key]: value }))
@@ -202,15 +202,11 @@ function RunComposer({ options, activeCount, onCreated }: { options: Options; ac
             <SelectContent>{modelOptions.map((item) => <SelectItem value={item.value} key={item.value}>{item.label}{item.configured ? "" : " · missing key"}</SelectItem>)}</SelectContent>
           </Select>
         </Field>
-        <Field label="Language" hint={isSarvam ? (config.language === "unknown" ? "Sarvam detects the spoken language" : "Known language improves Sarvam accuracy") : "Provider language code"}>
-          {isSarvam ? (
-            <Select value={config.language} onValueChange={(value) => update("language", value)}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>{LANGUAGE_OPTIONS.map(([value, label]) => <SelectItem value={value} key={value}>{label}</SelectItem>)}</SelectContent>
-            </Select>
-          ) : (
-            <Input value={config.language} onChange={(event) => update("language", event.target.value)} />
-          )}
+        <Field label="Language" hint={unsupportedMode ? `${effectiveStreaming ? "Streaming" : "Batch"} evaluation is not supported for this model` : config.language === "unknown" ? "The provider detects the spoken language" : "Only languages supported by this model and mode are shown"}>
+          <Select disabled={unsupportedMode} value={unsupportedMode ? undefined : config.language} onValueChange={(value) => update("language", value)}>
+            <SelectTrigger><SelectValue placeholder="No supported language options" /></SelectTrigger>
+            <SelectContent>{languageOptions.map((option) => <SelectItem value={option.code} key={option.code}>{option.label} ({option.code})</SelectItem>)}</SelectContent>
+          </Select>
         </Field>
         <div className="form-grid-2">
           <Field label="Workers" hint="Per-run concurrency"><Input type="number" min={1} max={300} value={config.max_workers} onChange={(event) => update("max_workers", Number(event.target.value))} /></Field>
@@ -254,7 +250,7 @@ function RunComposer({ options, activeCount, onCreated }: { options: Options; ac
 
       {missingCredential && <div className="credential-error"><KeyRound className="size-4" />{missingPreprocessorCredential ? `${missingPreprocessorCredential} is missing on the server.` : `${provider?.label || "Provider"} credentials are missing on the server.`}</div>}
 
-      <Button type="submit" className="h-11 w-full" disabled={submitting || missingCredential}>
+      <Button type="submit" className="h-11 w-full" disabled={submitting || missingCredential || unsupportedMode}>
         {submitting ? <RefreshCw className="size-4 spin" /> : <Play className="size-4 fill-current" />}
         {submitting ? "Starting…" : "Run evaluation"}
       </Button>

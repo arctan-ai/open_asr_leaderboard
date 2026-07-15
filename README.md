@@ -110,6 +110,8 @@ The `.env` file is loaded with `python-dotenv` for preprocessors that need crede
 
 The internal React console wraps `api/run_eval.py` with dataset inspection, server-side credential checks, isolated parallel runs, live logs, cancellation, and persistent result history.
 
+See the [Open ASR Evaluation Console guide](web/README.md) for complete UI setup, usage, verification, and deployment instructions.
+
 Development:
 
 ```bash

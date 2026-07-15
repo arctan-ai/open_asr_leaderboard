@@ -85,15 +85,20 @@ class AssemblyAIProvider(APIProvider):
 
         # Models like "universal-3-pro" use the newer speech_models (list) API
         MULTI_MODEL_VARIANTS = {"universal-3-pro"}
+        language_config = (
+            {"language_detection": True}
+            if language == "unknown"
+            else {"language_code": language}
+        )
         if model_variant in MULTI_MODEL_VARIANTS:
             config = aai.TranscriptionConfig(
                 speech_models=[model_variant],
-                language_code=language,
+                **language_config,
             )
         else:
             config = aai.TranscriptionConfig(
                 speech_model=model_variant,
-                language_code=language,
+                **language_config,
             )
 
         if use_url:
