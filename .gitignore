@@ -140,3 +140,10 @@ results_bucket/*
 # results
 *.jsonl
 *.png
+/results/ui-runs/
+
+# Evaluation console build and dependency artifacts
+web/node_modules/
+web/*.tsbuildinfo
+web/vite.config.js
+web/vite.config.d.ts

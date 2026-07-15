@@ -106,6 +106,35 @@ Optional Silero VAD is enabled with `--vad_position=pre` or `--vad_position=post
 
 The `.env` file is loaded with `python-dotenv` for preprocessors that need credentials. The default is `--audio_preprocessor=none`, which preserves the existing evaluation path. API URL mode, multilingual scripts, Nemo scripts, and long-form scripts are not wired for this MVP path. Reported RTFx still measures ASR inference time only; preprocessing runs before the timed transcription section.
 
+### Evaluation console
+
+The internal React console wraps `api/run_eval.py` with dataset inspection, server-side credential checks, isolated parallel runs, live logs, cancellation, and persistent result history.
+
+Development:
+
+```bash
+# once per environment
+uv pip install -r requirements/requirements-ui.txt
+
+# terminal 1
+uv run uvicorn api.ui_server:app --host 127.0.0.1 --port 8000 --reload
+
+# terminal 2
+npm --prefix web install
+npm --prefix web run dev
+```
+
+Build the production assets with `npm --prefix web run build`; FastAPI serves
+the resulting `web/dist` directory.
+
+Production on `livekit-server` serves the built Vite app and API from the same localhost-only process. After installing `deploy/open-asr-console.service`, connect with:
+
+```bash
+ssh -L 8080:127.0.0.1:8080 livekit-server
+```
+
+Then open `http://127.0.0.1:8080`. Credentials remain in the server `.env`; the browser only receives configured/missing status.
+
 # Trade-off plots
 
 For open-source models, you can plot tradeoff plots like below with `scripts/plot_all.sh`.

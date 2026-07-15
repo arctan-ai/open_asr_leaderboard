@@ -1,0 +1,618 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import signal
+import sqlite3
+import subprocess
+import sys
+import threading
+import uuid
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Literal
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field, model_validator
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_RESULTS_ROOT = REPO_ROOT / "results" / "ui-runs"
+DEFAULT_WEB_DIST = REPO_ROOT / "web" / "dist"
+RUNNER_PATH = REPO_ROOT / "api" / "run_eval.py"
+TERMINAL_STATES = {"completed", "failed", "cancelled", "interrupted"}
+
+PROVIDERS = {
+    "assembly": {
+        "label": "AssemblyAI",
+        "models": ["universal-3-pro"],
+        "credentials": ["ASSEMBLYAI_API_KEY"],
+    },
+    "cartesia": {
+        "label": "Cartesia",
+        "models": ["ink-whisper", "ink-2"],
+        "credentials": ["CARTESIA_API_KEY"],
+    },
+    "deepgram": {
+        "label": "Deepgram",
+        "models": ["nova-3"],
+        "credentials": ["DEEPGRAM_API_KEY"],
+    },
+    "microsoft": {
+        "label": "Microsoft Azure",
+        "models": ["azure-speech-05-2026", "MAI-Transcribe-1.5"],
+        "credentials": ["AZURE_API_KEY"],
+    },
+    "smallestai": {
+        "label": "Smallest AI",
+        "models": ["pulse"],
+        "credentials": ["SMALLESTAI_API_KEY"],
+    },
+    "soniox": {
+        "label": "Soniox",
+        "models": ["stt-async-v5", "stt-rt-v5"],
+        "credentials": ["SONIOX_API_KEY"],
+    },
+}
+
+PREPROCESSORS = ["none", "arctan", "ai_coustics_vfl_2_1", "krisp_bvc", "rnnoise"]
+VAD_POSITIONS = ["none", "pre", "post"]
+
+load_dotenv(REPO_ROOT / ".env")
+PREPROCESSOR_CREDENTIALS = {
+    "arctan": ["ARCTAN_SDK_KEY"],
+    "ai_coustics_vfl_2_1": [
+        "LIVEKIT_URL",
+        "LIVEKIT_API_KEY",
+        "LIVEKIT_API_SECRET",
+    ],
+    "krisp_bvc": ["LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"],
+}
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def env_configured(name: str) -> bool:
+    value = os.environ.get(name, "")
+    return bool(value and value != "your_api_key")
+
+
+class RunCreate(BaseModel):
+    dataset_path: str = Field(min_length=1, max_length=300)
+    dataset: str = Field(default="default", min_length=1, max_length=200)
+    split: str = Field(default="test", min_length=1, max_length=200)
+    model_name: str = Field(default="deepgram/nova-3", min_length=3, max_length=200)
+    max_samples: int | None = Field(default=None, ge=1)
+    max_workers: int = Field(default=4, ge=1, le=300)
+    use_url: bool = False
+    streaming: bool = False
+    prompt: str | None = Field(default=None, max_length=2000)
+    audio_preprocessor: Literal[
+        "none", "arctan", "ai_coustics_vfl_2_1", "krisp_bvc", "rnnoise"
+    ] = "none"
+    vad_position: Literal["none", "pre", "post"] = "none"
+    arctan_chunk_ms: int = Field(default=10, ge=1, le=1000)
+    audio_preprocessor_batch_size: int = Field(default=1, ge=1, le=1000)
+    ai_coustics_project_dir: str | None = None
+    ai_coustics_sample_rate: int = Field(default=16000, ge=1)
+    ai_coustics_pad_seconds: float = Field(default=2.0, ge=0)
+    ai_coustics_enhancement_level: float = Field(default=1.0, ge=0, le=1)
+    krisp_bvc_project_dir: str | None = None
+    krisp_bvc_sample_rate: int = Field(default=16000, ge=1)
+    krisp_bvc_pad_seconds: float = Field(default=2.0, ge=0)
+
+    @model_validator(mode="after")
+    def validate_combination(self):
+        prefix, separator, variant = self.model_name.partition("/")
+        if not separator or prefix not in PROVIDERS:
+            raise ValueError(
+                "model_name must use a registered provider prefix: "
+                + ", ".join(PROVIDERS)
+            )
+        if variant not in PROVIDERS[prefix]["models"]:
+            allowed = ", ".join(
+                f"{prefix}/{model}" for model in PROVIDERS[prefix]["models"]
+            )
+            raise ValueError(f"Unsupported model_name. Allowed values: {allowed}")
+        forced_streaming = self.model_name == "soniox/stt-rt-v5"
+        if self.use_url and (self.streaming or forced_streaming):
+            raise ValueError("URL mode cannot be combined with streaming")
+        if self.use_url and self.audio_preprocessor != "none":
+            raise ValueError("URL mode cannot be combined with audio preprocessing")
+        if self.use_url and self.vad_position != "none":
+            raise ValueError("URL mode cannot be combined with VAD")
+        return self
+
+
+class DatasetInspect(BaseModel):
+    dataset_path: str = Field(min_length=1, max_length=300)
+
+
+class RunStore:
+    def __init__(self, root: Path):
+        self.root = root
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.db_path = self.root / "runs.db"
+        self._initialize()
+
+    @contextmanager
+    def _connect(self):
+        connection = sqlite3.connect(self.db_path, timeout=30)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA journal_mode=WAL")
+        try:
+            yield connection
+            connection.commit()
+        finally:
+            connection.close()
+
+    def _initialize(self):
+        with self._connect() as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS runs (
+                    id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    pid INTEGER,
+                    output_dir TEXT NOT NULL,
+                    config_json TEXT NOT NULL,
+                    summary_json TEXT,
+                    error TEXT
+                )
+                """
+            )
+            connection.execute(
+                """
+                UPDATE runs
+                SET status = 'interrupted', finished_at = ?,
+                    error = COALESCE(error, 'UI server restarted while run was active')
+                WHERE status IN ('queued', 'running', 'cancelling')
+                """,
+                (now_iso(),),
+            )
+
+    def create(self, run_id: str, config: dict, output_dir: Path):
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO runs (id, status, created_at, output_dir, config_json)
+                VALUES (?, 'queued', ?, ?, ?)
+                """,
+                (run_id, now_iso(), str(output_dir), json.dumps(config)),
+            )
+
+    def update(self, run_id: str, **values):
+        if not values:
+            return
+        assignments = ", ".join(f"{key} = ?" for key in values)
+        with self._connect() as connection:
+            connection.execute(
+                f"UPDATE runs SET {assignments} WHERE id = ?",
+                (*values.values(), run_id),
+            )
+
+    def get(self, run_id: str) -> dict | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM runs WHERE id = ?", (run_id,)
+            ).fetchone()
+        return self._serialize(row) if row else None
+
+    def list(self) -> list[dict]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM runs ORDER BY created_at DESC"
+            ).fetchall()
+        return [self._serialize(row) for row in rows]
+
+    @staticmethod
+    def _serialize(row: sqlite3.Row) -> dict:
+        result = dict(row)
+        result["config"] = json.loads(result.pop("config_json"))
+        summary_json = result.pop("summary_json")
+        result["summary"] = json.loads(summary_json) if summary_json else None
+        output_dir = Path(result["output_dir"])
+        artifacts = []
+        if output_dir.exists():
+            artifacts = sorted(
+                path.name
+                for path in output_dir.iterdir()
+                if path.is_file()
+                and (
+                    path.name in {"run.log", "summary.json"} or path.suffix == ".jsonl"
+                )
+            )
+        result["artifacts"] = artifacts
+        return result
+
+
+class RunManager:
+    def __init__(self, store: RunStore, runner_path: Path = RUNNER_PATH):
+        self.store = store
+        self.runner_path = runner_path
+        self.processes: dict[str, subprocess.Popen] = {}
+        self._lock = threading.Lock()
+
+    def start(self, request: RunCreate) -> dict:
+        self._validate_credentials(request)
+        run_id = uuid.uuid4().hex[:12]
+        output_dir = self.store.root / run_id
+        output_dir.mkdir(parents=True, exist_ok=False)
+        config = request.model_dump()
+        self.store.create(run_id, config, output_dir)
+        thread = threading.Thread(
+            target=self._execute,
+            args=(run_id, request, output_dir),
+            daemon=True,
+            name=f"eval-{run_id}",
+        )
+        thread.start()
+        return self.store.get(run_id)
+
+    def _validate_credentials(self, request: RunCreate):
+        prefix = request.model_name.split("/", 1)[0]
+        missing = [
+            name
+            for name in PROVIDERS[prefix]["credentials"]
+            if not env_configured(name)
+        ]
+        if request.model_name == "microsoft/MAI-Transcribe-1.5" and request.streaming:
+            missing = [
+                name for name in ("AZURE_SPEECH_ENDPOINT",) if not env_configured(name)
+            ]
+            if not (
+                env_configured("AZURE_SPEECH_KEY") or env_configured("AZURE_API_KEY")
+            ):
+                missing.append("AZURE_SPEECH_KEY")
+        missing.extend(
+            name
+            for name in PREPROCESSOR_CREDENTIALS.get(request.audio_preprocessor, [])
+            if not env_configured(name)
+        )
+        if missing:
+            raise ValueError(
+                "Missing server credentials: " + ", ".join(sorted(set(missing)))
+            )
+
+    def build_command(self, request: RunCreate, output_dir: Path) -> list[str]:
+        command = [
+            sys.executable,
+            "-u",
+            str(self.runner_path),
+            "--dataset_path",
+            request.dataset_path,
+            "--dataset",
+            request.dataset,
+            "--split",
+            request.split,
+            "--model_name",
+            request.model_name,
+            "--max_workers",
+            str(request.max_workers),
+            "--output_dir",
+            str(output_dir),
+            "--audio_preprocessor",
+            request.audio_preprocessor,
+            "--vad_position",
+            request.vad_position,
+            "--arctan_chunk_ms",
+            str(request.arctan_chunk_ms),
+            "--audio_preprocessor_batch_size",
+            str(request.audio_preprocessor_batch_size),
+        ]
+        if request.max_samples is not None:
+            command.extend(["--max_samples", str(request.max_samples)])
+        if request.use_url:
+            command.append("--use_url")
+        if request.streaming:
+            command.append("--streaming")
+        if request.prompt:
+            command.extend(["--prompt", request.prompt])
+        if request.ai_coustics_project_dir:
+            command.extend(
+                ["--ai_coustics_project_dir", request.ai_coustics_project_dir]
+            )
+        if request.audio_preprocessor == "ai_coustics_vfl_2_1":
+            command.extend(
+                [
+                    "--ai_coustics_sample_rate",
+                    str(request.ai_coustics_sample_rate),
+                    "--ai_coustics_pad_seconds",
+                    str(request.ai_coustics_pad_seconds),
+                    "--ai_coustics_enhancement_level",
+                    str(request.ai_coustics_enhancement_level),
+                ]
+            )
+        if request.krisp_bvc_project_dir:
+            command.extend(["--krisp_bvc_project_dir", request.krisp_bvc_project_dir])
+        if request.audio_preprocessor == "krisp_bvc":
+            command.extend(
+                [
+                    "--krisp_bvc_sample_rate",
+                    str(request.krisp_bvc_sample_rate),
+                    "--krisp_bvc_pad_seconds",
+                    str(request.krisp_bvc_pad_seconds),
+                ]
+            )
+        return command
+
+    def _execute(self, run_id: str, request: RunCreate, output_dir: Path):
+        log_path = output_dir / "run.log"
+        command = self.build_command(request, output_dir)
+        try:
+            with log_path.open("w", encoding="utf-8", buffering=1) as log_file:
+                process = subprocess.Popen(
+                    command,
+                    cwd=REPO_ROOT,
+                    env=os.environ.copy(),
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    start_new_session=True,
+                )
+                with self._lock:
+                    self.processes[run_id] = process
+                self.store.update(
+                    run_id,
+                    status="running",
+                    started_at=now_iso(),
+                    pid=process.pid,
+                )
+                return_code = process.wait()
+
+            current = self.store.get(run_id)
+            summary_path = output_dir / "summary.json"
+            summary = None
+            if summary_path.exists():
+                summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            if current and current["status"] == "cancelling":
+                status = "cancelled"
+                error = "Cancelled by operator"
+            elif return_code == 0:
+                status = "completed"
+                error = None
+            else:
+                status = "failed"
+                error = (summary or {}).get(
+                    "error"
+                ) or f"Evaluator exited with code {return_code}"
+            self.store.update(
+                run_id,
+                status=status,
+                finished_at=now_iso(),
+                summary_json=json.dumps(summary) if summary else None,
+                error=error,
+            )
+        except Exception as exc:
+            self.store.update(
+                run_id,
+                status="failed",
+                finished_at=now_iso(),
+                error=str(exc),
+            )
+        finally:
+            with self._lock:
+                self.processes.pop(run_id, None)
+
+    def cancel(self, run_id: str) -> dict:
+        run = self.store.get(run_id)
+        if run is None:
+            raise KeyError(run_id)
+        if run["status"] in TERMINAL_STATES:
+            return run
+        with self._lock:
+            process = self.processes.get(run_id)
+        self.store.update(run_id, status="cancelling")
+        if process and process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+
+            def force_kill():
+                if process.poll() is None:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+            timer = threading.Timer(5, force_kill)
+            timer.daemon = True
+            timer.start()
+        return self.store.get(run_id)
+
+
+def options_payload() -> dict:
+    providers = []
+    credential_names = {"HF_TOKEN"}
+    for prefix, provider in PROVIDERS.items():
+        credential_names.update(provider["credentials"])
+        providers.append(
+            {
+                "prefix": prefix,
+                "label": provider["label"],
+                "models": provider["models"],
+                "configured": all(
+                    env_configured(name) for name in provider["credentials"]
+                ),
+            }
+        )
+    for names in PREPROCESSOR_CREDENTIALS.values():
+        credential_names.update(names)
+    credential_names.update({"AZURE_SPEECH_KEY", "AZURE_SPEECH_ENDPOINT"})
+    return {
+        "providers": providers,
+        "preprocessors": PREPROCESSORS,
+        "vad_positions": VAD_POSITIONS,
+        "credentials": {
+            name: env_configured(name) for name in sorted(credential_names)
+        },
+        "defaults": {
+            "model_name": "deepgram/nova-3",
+            "dataset": "default",
+            "split": "test",
+            "max_workers": 4,
+        },
+    }
+
+
+def create_app(
+    results_root: Path | None = None,
+    runner_path: Path = RUNNER_PATH,
+    web_dist: Path = DEFAULT_WEB_DIST,
+) -> FastAPI:
+    app = FastAPI(title="Open ASR Evaluation Console", version="0.1.0")
+    store = RunStore(
+        results_root
+        or Path(os.environ.get("OPEN_ASR_UI_RESULTS_DIR", DEFAULT_RESULTS_ROOT))
+    )
+    manager = RunManager(store, runner_path=runner_path)
+    app.state.store = store
+    app.state.manager = manager
+
+    @app.get("/api/health")
+    def health():
+        active = sum(
+            run["status"] in {"queued", "running", "cancelling"} for run in store.list()
+        )
+        return {"status": "ok", "active_runs": active}
+
+    @app.get("/api/options")
+    def options():
+        return options_payload()
+
+    @app.post("/api/datasets/inspect")
+    async def inspect_dataset(request: DatasetInspect):
+        def inspect():
+            import datasets
+
+            configs = datasets.get_dataset_config_names(request.dataset_path)
+            details = []
+            for config in configs:
+                splits = datasets.get_dataset_split_names(request.dataset_path, config)
+                builder = datasets.load_dataset_builder(request.dataset_path, config)
+                details.append(
+                    {
+                        "name": config,
+                        "splits": splits,
+                        "features": list(builder.info.features or {}),
+                        "schema": (
+                            builder.info.features.to_dict()
+                            if builder.info.features is not None
+                            else {}
+                        ),
+                    }
+                )
+            return {"dataset_path": request.dataset_path, "configs": details}
+
+        try:
+            return await asyncio.to_thread(inspect)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/runs", status_code=201)
+    def create_run(request: RunCreate):
+        try:
+            return manager.start(request)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/runs")
+    def list_runs():
+        return store.list()
+
+    @app.get("/api/runs/{run_id}")
+    def get_run(run_id: str):
+        run = store.get(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="Run not found")
+        return run
+
+    @app.post("/api/runs/{run_id}/cancel")
+    def cancel_run(run_id: str):
+        try:
+            return manager.cancel(run_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Run not found") from exc
+
+    @app.get("/api/runs/{run_id}/events")
+    async def run_events(run_id: str):
+        if store.get(run_id) is None:
+            raise HTTPException(status_code=404, detail="Run not found")
+
+        async def events():
+            offset = 0
+            last_status = None
+            while True:
+                run = store.get(run_id)
+                if run is None:
+                    break
+                log_path = Path(run["output_dir"]) / "run.log"
+                if log_path.exists():
+                    with log_path.open(
+                        "r", encoding="utf-8", errors="replace"
+                    ) as handle:
+                        handle.seek(offset)
+                        chunk = handle.read()
+                        offset = handle.tell()
+                    if chunk:
+                        yield f"event: log\ndata: {json.dumps({'chunk': chunk})}\n\n"
+                if run["status"] != last_status:
+                    last_status = run["status"]
+                    yield f"event: status\ndata: {json.dumps(run)}\n\n"
+                if run["status"] in TERMINAL_STATES:
+                    break
+                yield ": keep-alive\n\n"
+                await asyncio.sleep(0.75)
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @app.get("/api/runs/{run_id}/artifacts/{name}")
+    def artifact(run_id: str, name: str):
+        run = store.get(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="Run not found")
+        if Path(name).name != name or not (
+            name in {"run.log", "summary.json"} or name.endswith(".jsonl")
+        ):
+            raise HTTPException(status_code=400, detail="Unsupported artifact")
+        path = Path(run["output_dir"]) / name
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="Artifact not found")
+        return FileResponse(path, filename=name)
+
+    assets_dir = web_dist / "assets"
+    if assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def spa(full_path: str):
+        if full_path == "api" or full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="API route not found")
+        index_path = web_dist / "index.html"
+        if index_path.is_file():
+            return FileResponse(index_path)
+        return JSONResponse(
+            {
+                "message": "Open ASR Evaluation Console API",
+                "frontend": "not built",
+            }
+        )
+
+    return app
+
+
+app = create_app()

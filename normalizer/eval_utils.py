@@ -385,6 +385,7 @@ def write_manifest(
     audio_length: list = None,
     transcription_time: list = None,
     audio_filepaths: list = None,
+    basedir: str = "./results/",
 ):
     """
     Writes a manifest file (jsonl format) and returns the path to the file.
@@ -440,7 +441,6 @@ def write_manifest(
         audio_filepaths if audio_filepaths is not None else len(references) * [None]
     )
 
-    basedir = "./results/"
     if not os.path.exists(basedir):
         os.makedirs(basedir)
 
