@@ -7,7 +7,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_LOCAL_DATASET_ROOT = REPO_ROOT.parent / "dataset"
-DEFAULT_HF_DATASET_REPO = "bettercallaaryan/nc_agent_clips_openasr"
+DEFAULT_HF_DATASET_REPOS = (
+    "bettercallaaryan/nc_agent_clips_openasr",
+    "bettercallaaryan/acefone_stt_eval_openasr",
+)
 TRANSCRIPT_COLUMNS = (
     "text",
     "sentence",
@@ -21,14 +24,33 @@ INVALID_DATASET_MESSAGE = (
 )
 
 
+class DatasetValidationError(ValueError):
+    pass
+
+
 def local_dataset_root() -> Path:
     return Path(
         os.environ.get("OPEN_ASR_LOCAL_DATASET_ROOT", DEFAULT_LOCAL_DATASET_ROOT)
     ).expanduser()
 
 
+def huggingface_dataset_repos() -> list[str]:
+    configured = os.environ.get("OPEN_ASR_HF_DATASET_REPOS", "")
+    if configured.strip():
+        repos = [repo.strip() for repo in configured.split(",") if repo.strip()]
+    else:
+        legacy = os.environ.get("OPEN_ASR_HF_DATASET_REPO", "").strip()
+        repos = (
+            [legacy, *DEFAULT_HF_DATASET_REPOS[1:]]
+            if legacy
+            else list(DEFAULT_HF_DATASET_REPOS)
+        )
+    return list(dict.fromkeys(repos))
+
+
 def huggingface_dataset_repo() -> str:
-    return os.environ.get("OPEN_ASR_HF_DATASET_REPO", DEFAULT_HF_DATASET_REPO)
+    """Return the first configured repository for legacy callers."""
+    return huggingface_dataset_repos()[0]
 
 
 def source_options() -> list[dict]:
@@ -37,7 +59,7 @@ def source_options() -> list[dict]:
             "id": "huggingface",
             "label": "Hugging Face",
             "kind": "huggingface",
-            "description": huggingface_dataset_repo(),
+            "description": f"{len(huggingface_dataset_repos())} configured repositories",
         },
         {
             "id": "local",
@@ -109,14 +131,6 @@ def local_dataset_catalog() -> dict:
         key=lambda path: path.name.casefold(),
     )
     for child in children:
-        manifest, error = find_local_manifest(child)
-        features: list[str] = []
-        if manifest is not None:
-            try:
-                features = read_csv_features(manifest)
-                error = validate_schema(features, ["test"])
-            except Exception as exc:
-                error = validation_error(str(exc))
         entries.append(
             {
                 "id": child.name,
@@ -124,10 +138,11 @@ def local_dataset_catalog() -> dict:
                 "dataset_source": "local",
                 "dataset_path": child.name,
                 "dataset": "default",
-                "splits": ["test"] if manifest is not None else [],
-                "features": features,
-                "valid": error is None,
-                "error": error,
+                "splits": ["test"],
+                "features": [],
+                "valid": None,
+                "error": None,
+                "validation_status": "unchecked",
             }
         )
 
@@ -137,33 +152,32 @@ def local_dataset_catalog() -> dict:
 def huggingface_dataset_catalog() -> dict:
     import datasets
 
-    repo = huggingface_dataset_repo()
     token = os.environ.get("HF_TOKEN") or None
-    configs = datasets.get_dataset_config_names(repo, token=token)
     entries = []
-    for config in configs:
+    for repo in huggingface_dataset_repos():
         try:
-            splits = datasets.get_dataset_split_names(repo, config, token=token)
-            builder = datasets.load_dataset_builder(repo, config, token=token)
-            features = list(builder.info.features or {})
-            error = validate_schema(features, splits)
-        except Exception as exc:
-            splits = []
-            features = []
-            error = validation_error(f"inspection failed: {exc}")
-        entries.append(
-            {
-                "id": config,
-                "label": config,
-                "dataset_source": "huggingface",
-                "dataset_path": repo,
-                "dataset": config,
-                "splits": splits,
-                "features": features,
-                "valid": error is None,
-                "error": error,
-            }
-        )
+            configs = datasets.get_dataset_config_names(repo, token=token)
+        except Exception:
+            configs = ["default"]
+        for config in configs or ["default"]:
+            try:
+                splits = datasets.get_dataset_split_names(repo, config, token=token)
+            except Exception:
+                splits = ["test"]
+            entries.append(
+                {
+                    "id": f"{repo}::{config}",
+                    "label": f"{repo.rsplit('/', 1)[-1]} · {config}",
+                    "dataset_source": "huggingface",
+                    "dataset_path": repo,
+                    "dataset": config,
+                    "splits": splits or ["test"],
+                    "features": [],
+                    "valid": None,
+                    "error": None,
+                    "validation_status": "unchecked",
+                }
+            )
     return {"source_id": "huggingface", "datasets": entries}
 
 
@@ -187,6 +201,66 @@ def resolve_local_dataset_dir(dataset_path: str) -> Path:
     if not candidate.is_dir():
         raise ValueError(f"Local dataset does not exist: {dataset_path}")
     return candidate
+
+
+def validate_dataset_selection(
+    dataset_source: str,
+    dataset_path: str,
+    dataset: str,
+    split: str,
+) -> dict:
+    if dataset_source == "huggingface":
+        import datasets
+
+        token = os.environ.get("HF_TOKEN") or None
+        try:
+            splits = datasets.get_dataset_split_names(
+                dataset_path, dataset, token=token
+            )
+            builder = datasets.load_dataset_builder(
+                dataset_path, dataset, token=token
+            )
+            features = list(builder.info.features or {})
+        except Exception as exc:
+            raise DatasetValidationError(
+                validation_error(f"inspection failed: {exc}")
+            ) from exc
+        if split not in splits:
+            available = ", ".join(splits) if splits else "none"
+            raise DatasetValidationError(
+                validation_error(
+                    f"selected split '{split}' was not found; available splits: {available}"
+                )
+            )
+    elif dataset_source == "local":
+        if dataset != "default" or split != "test":
+            raise DatasetValidationError(
+                validation_error(
+                    "local datasets expose only config 'default' and split 'test'"
+                )
+            )
+        try:
+            dataset_dir = resolve_local_dataset_dir(dataset_path)
+            manifest, manifest_error = find_local_manifest(dataset_dir)
+            if manifest is None:
+                raise DatasetValidationError(
+                    manifest_error or validation_error("no CSV manifest was found")
+                )
+            features = read_csv_features(manifest)
+            splits = ["test"]
+        except DatasetValidationError:
+            raise
+        except Exception as exc:
+            raise DatasetValidationError(validation_error(str(exc))) from exc
+    else:
+        raise DatasetValidationError(
+            validation_error(f"unsupported dataset source '{dataset_source}'")
+        )
+
+    schema_error = validate_schema(features, splits)
+    if schema_error:
+        raise DatasetValidationError(schema_error)
+    return {"features": features, "splits": splits}
 
 
 def load_evaluation_dataset(

@@ -39,42 +39,44 @@ class DatasetCatalogTest(unittest.TestCase):
             clear=False,
         )
 
-    def test_local_catalog_is_sorted_and_reports_schema_errors(self):
+    def test_local_catalog_is_sorted_without_reading_manifests(self):
         self.write_manifest("Valid", "audio,text")
         self.write_manifest("Missing audio", "id,text", filename="stt.csv")
         self.write_manifest("Missing transcript", "audio,id")
         (self.root / "No manifest").mkdir()
-        ambiguous = self.root / "Ambiguous"
-        ambiguous.mkdir()
-        (ambiguous / "one.csv").write_text("audio,text\n", encoding="utf-8")
-        (ambiguous / "two.csv").write_text("audio,text\n", encoding="utf-8")
         self.write_manifest(".hidden", "audio,text")
 
-        with self.local_env():
+        with self.local_env(), mock.patch(
+            "api.dataset_catalog.read_csv_features"
+        ) as read_features:
             payload = catalog.local_dataset_catalog()
 
         entries = payload["datasets"]
         self.assertEqual(
             [entry["label"] for entry in entries],
-            ["Ambiguous", "Missing audio", "Missing transcript", "No manifest", "Valid"],
+            ["Missing audio", "Missing transcript", "No manifest", "Valid"],
         )
-        by_name = {entry["label"]: entry for entry in entries}
-        self.assertTrue(by_name["Valid"]["valid"])
-        self.assertEqual(by_name["Valid"]["splits"], ["test"])
-        self.assertIn("missing required 'audio' column", by_name["Missing audio"]["error"])
-        self.assertIn("missing a transcript column", by_name["Missing transcript"]["error"])
-        self.assertIn("no CSV manifest", by_name["No manifest"]["error"])
-        self.assertIn("multiple CSV manifests", by_name["Ambiguous"]["error"])
+        self.assertTrue(all(entry["valid"] is None for entry in entries))
+        self.assertTrue(all(entry["validation_status"] == "unchecked" for entry in entries))
+        self.assertTrue(all(entry["splits"] == ["test"] for entry in entries))
+        read_features.assert_not_called()
 
-    def test_metadata_csv_is_preferred_over_other_csv_files(self):
+    def test_local_selection_is_validated_only_when_requested(self):
         dataset_dir = self.write_manifest("Preferred", "audio,text")
         (dataset_dir / "extra.csv").write_text("id,text\n", encoding="utf-8")
 
         with self.local_env():
-            entry = catalog.local_dataset_catalog()["datasets"][0]
+            result = catalog.validate_dataset_selection(
+                "local", "Preferred", "default", "test"
+            )
 
-        self.assertTrue(entry["valid"])
-        self.assertEqual(entry["features"], ["audio", "text"])
+        self.assertEqual(result["features"], ["audio", "text"])
+
+        self.write_manifest("Broken", "id,text")
+        with self.local_env(), self.assertRaisesRegex(
+            catalog.DatasetValidationError, "missing required 'audio' column"
+        ):
+            catalog.validate_dataset_selection("local", "Broken", "default", "test")
 
     def test_local_directory_resolution_rejects_traversal(self):
         self.write_manifest("Valid", "audio,text")
@@ -85,47 +87,78 @@ class DatasetCatalogTest(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         catalog.resolve_local_dataset_dir(invalid)
 
-    def test_huggingface_configs_are_validated_independently(self):
-        features = {
-            "valid": {"audio": object(), "text": object()},
-            "missing-audio": {"text": object()},
-            "no-splits": {"audio": object(), "transcript": object()},
-        }
-
-        def splits(_repo, config, **_kwargs):
-            if config == "broken":
-                raise RuntimeError("private config unavailable")
-            return [] if config == "no-splits" else ["test", "validation"]
-
-        def builder(_repo, config, **_kwargs):
-            return types.SimpleNamespace(
-                info=types.SimpleNamespace(features=features[config])
+    def test_default_huggingface_repositories_include_acefone(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                catalog.huggingface_dataset_repos(),
+                [
+                    "bettercallaaryan/nc_agent_clips_openasr",
+                    "bettercallaaryan/acefone_stt_eval_openasr",
+                ],
             )
+
+    def test_huggingface_catalog_lists_configs_without_builder_inspection(self):
+        def configs(repo, **_kwargs):
+            return ["default", "other"] if repo == "owner/one" else ["default"]
 
         with mock.patch.dict(
             os.environ,
             {
-                "OPEN_ASR_HF_DATASET_REPO": "owner/repo",
+                "OPEN_ASR_HF_DATASET_REPOS": "owner/one,owner/two",
                 "HF_TOKEN": "secret-token",
             },
             clear=False,
         ), mock.patch(
-            "datasets.get_dataset_config_names",
-            return_value=["valid", "missing-audio", "no-splits", "broken"],
+            "datasets.get_dataset_config_names", side_effect=configs
         ) as get_configs, mock.patch(
-            "datasets.get_dataset_split_names", side_effect=splits
-        ), mock.patch(
-            "datasets.load_dataset_builder", side_effect=builder
-        ):
+            "datasets.get_dataset_split_names", return_value=["test", "validation"]
+        ), mock.patch("datasets.load_dataset_builder") as load_builder:
             payload = catalog.huggingface_dataset_catalog()
 
-        by_name = {entry["id"]: entry for entry in payload["datasets"]}
-        self.assertTrue(by_name["valid"]["valid"])
-        self.assertFalse(by_name["missing-audio"]["valid"])
-        self.assertIn("no usable splits", by_name["no-splits"]["error"])
-        self.assertIn("inspection failed", by_name["broken"]["error"])
+        self.assertEqual(
+            [entry["id"] for entry in payload["datasets"]],
+            [
+                "owner/one::default",
+                "owner/one::other",
+                "owner/two::default",
+            ],
+        )
+        self.assertTrue(all(entry["valid"] is None for entry in payload["datasets"]))
         self.assertNotIn("secret-token", str(payload))
-        get_configs.assert_called_once_with("owner/repo", token="secret-token")
+        self.assertEqual(get_configs.call_count, 2)
+        load_builder.assert_not_called()
+
+    def test_huggingface_selection_runs_schema_validation(self):
+        builder = types.SimpleNamespace(
+            info=types.SimpleNamespace(features={"audio": object(), "text": object()})
+        )
+        with mock.patch.dict(
+            os.environ, {"HF_TOKEN": "secret-token"}, clear=False
+        ), mock.patch(
+            "datasets.get_dataset_split_names", return_value=["test", "validation"]
+        ) as get_splits, mock.patch(
+            "datasets.load_dataset_builder", return_value=builder
+        ) as load_builder:
+            result = catalog.validate_dataset_selection(
+                "huggingface", "owner/repo", "default", "test"
+            )
+
+        self.assertEqual(result["features"], ["audio", "text"])
+        get_splits.assert_called_once_with("owner/repo", "default", token="secret-token")
+        load_builder.assert_called_once_with("owner/repo", "default", token="secret-token")
+
+    def test_huggingface_selection_reports_incompatible_schema(self):
+        builder = types.SimpleNamespace(
+            info=types.SimpleNamespace(features={"text": object()})
+        )
+        with mock.patch(
+            "datasets.get_dataset_split_names", return_value=["test"]
+        ), mock.patch("datasets.load_dataset_builder", return_value=builder), self.assertRaisesRegex(
+            catalog.DatasetValidationError, "missing required 'audio' column"
+        ):
+            catalog.validate_dataset_selection(
+                "huggingface", "owner/repo", "default", "test"
+            )
 
     def test_local_loader_resolves_relative_audio(self):
         dataset_dir = self.write_manifest("Valid", "audio,text")

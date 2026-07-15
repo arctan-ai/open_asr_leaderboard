@@ -25,8 +25,9 @@ export type DatasetOption = {
   dataset: string
   splits: string[]
   features: string[]
-  valid: boolean
+  valid: boolean | null
   error: string | null
+  validation_status?: "unchecked" | "valid" | "invalid"
 }
 
 export type DatasetCatalog = { source_id: string; datasets: DatasetOption[] }
@@ -89,6 +90,16 @@ export type Run = {
   artifacts: string[]
 }
 
+export class ApiError extends Error {
+  code?: string
+
+  constructor(message: string, code?: string) {
+    super(message)
+    this.name = "ApiError"
+    this.code = code
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     headers: { "Content-Type": "application/json", ...init?.headers },
@@ -96,7 +107,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   })
   if (!response.ok) {
     const body = await response.json().catch(() => ({ detail: response.statusText }))
-    throw new Error(body.detail || "Request failed")
+    const detail = body.detail
+    const message = typeof detail === "string" ? detail : detail?.message
+    const code = typeof detail === "object" ? detail?.code : undefined
+    throw new ApiError(message || "Request failed", code)
   }
   return response.json() as Promise<T>
 }
@@ -108,6 +122,7 @@ export const api = {
   run: (id: string) => request<Run>(`/api/runs/${id}`),
   createRun: (config: RunConfig) => request<Run>("/api/runs", { method: "POST", body: JSON.stringify(config) }),
   cancelRun: (id: string) => request<Run>(`/api/runs/${id}/cancel`, { method: "POST" }),
+  retryRun: (id: string) => request<Run>(`/api/runs/${id}/retry`, { method: "POST" }),
   inspectDataset: (dataset_path: string) => request<{ dataset_path: string; configs: { name: string; splits: string[]; features: string[]; schema?: Record<string, unknown> }[] }>("/api/datasets/inspect", { method: "POST", body: JSON.stringify({ dataset_path }) }),
   datasets: (source_id: string) => request<DatasetCatalog>(`/api/datasets?source_id=${encodeURIComponent(source_id)}`),
 }

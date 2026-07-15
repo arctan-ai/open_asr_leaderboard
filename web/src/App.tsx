@@ -14,13 +14,14 @@ import {
   Play,
   RefreshCw,
   Server,
+  RotateCcw,
   Settings2,
   Sun,
   TerminalSquare,
   Zap,
 } from "lucide-react"
 import { toast } from "sonner"
-import { api, type DatasetOption, type Options, type Run, type RunConfig } from "./api"
+import { ApiError, api, type DatasetOption, type Options, type Run, type RunConfig } from "./api"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -113,6 +114,11 @@ function RunComposer({ options, activeCount, onCreated }: { options: Options; ac
   const [datasetsLoading, setDatasetsLoading] = useState(false)
   const [datasetError, setDatasetError] = useState<string | null>(null)
   const datasetRequest = useRef(0)
+  const [datasetValidation, setDatasetValidation] = useState<{
+    selectionKey: string
+    status: "checking" | "valid" | "invalid"
+    message: string
+  } | null>(null)
 
   const modelOptions = useMemo(() => options.providers.flatMap((provider) => provider.models.map((model) => ({ value: `${provider.prefix}/${model}`, label: `${provider.label} · ${model}`, configured: provider.configured }))), [options])
   const provider = options.providers.find((item) => config.model_name.startsWith(`${item.prefix}/`))
@@ -146,17 +152,18 @@ function RunComposer({ options, activeCount, onCreated }: { options: Options; ac
   }
 
   const selectedDataset = datasets.find((item) => item.dataset_source === config.dataset_source && item.dataset_path === config.dataset_path && item.dataset === config.dataset)
-  const invalidDatasets = datasets.filter((item) => !item.valid)
+  const selectionKey = selectedDataset ? `${selectedDataset.id}::${config.split}` : ""
 
   const loadDatasets = useCallback(async (source: RunConfig["dataset_source"]) => {
     const requestId = ++datasetRequest.current
     setDatasetsLoading(true)
     setDatasetError(null)
+    setDatasetValidation(null)
     try {
       const result = await api.datasets(source)
       if (requestId !== datasetRequest.current) return
       setDatasets(result.datasets)
-      const first = result.datasets.find((item) => item.valid && item.splits.length > 0)
+      const first = result.datasets.find((item) => item.splits.length > 0)
       setConfig((current) => {
         if (current.dataset_source !== source) return current
         return {
@@ -182,7 +189,7 @@ function RunComposer({ options, activeCount, onCreated }: { options: Options; ac
   }, [config.dataset_source, loadDatasets])
 
   function selectDataset(id: string) {
-    const selected = datasets.find((item) => item.id === id && item.valid)
+    const selected = datasets.find((item) => item.id === id)
     if (!selected) return
     setConfig((current) => ({
       ...current,
@@ -194,12 +201,28 @@ function RunComposer({ options, activeCount, onCreated }: { options: Options; ac
   async function submit(event: FormEvent) {
     event.preventDefault()
     setSubmitting(true)
+    setDatasetValidation({
+      selectionKey,
+      status: "checking",
+      message: "Checking the selected dataset format…",
+    })
     try {
       const run = await api.createRun(config)
       toast.success("Evaluation started", { description: `${configuredModelLabel(run.config.model_name)} · ${run.id}` })
+      setDatasetValidation({
+        selectionKey,
+        status: "valid",
+        message: "This dataset is compatible with the evaluator.",
+      })
       onCreated(run)
     } catch (error) {
-      toast.error("Could not start evaluation", { description: error instanceof Error ? error.message : "Unknown error" })
+      const message = error instanceof Error ? error.message : "Unknown error"
+      setDatasetValidation(
+        error instanceof ApiError && error.code === "dataset_incompatible"
+          ? { selectionKey, status: "invalid", message }
+          : null,
+      )
+      toast.error("Could not start evaluation", { description: message })
     } finally {
       setSubmitting(false)
     }
@@ -230,8 +253,8 @@ function RunComposer({ options, activeCount, onCreated }: { options: Options; ac
         <Field label="Dataset">
           <div className="joined-control">
             <Select disabled={datasetsLoading || datasets.length === 0} value={selectedDataset?.id ?? ""} onValueChange={selectDataset}>
-              <SelectTrigger><SelectValue placeholder={datasetsLoading ? "Loading datasets…" : "Select a compatible dataset"} /></SelectTrigger>
-              <SelectContent>{datasets.map((item) => <SelectItem value={item.id} key={item.id} disabled={!item.valid} title={item.error ?? undefined}>{item.label}{item.valid ? "" : " · incompatible"}</SelectItem>)}</SelectContent>
+              <SelectTrigger><SelectValue placeholder={datasetsLoading ? "Loading datasets…" : "Select a dataset"} /></SelectTrigger>
+              <SelectContent>{datasets.map((item) => <SelectItem value={item.id} key={item.id}>{item.label}</SelectItem>)}</SelectContent>
             </Select>
             <Button type="button" variant="outline" onClick={() => void loadDatasets(config.dataset_source)} disabled={datasetsLoading} aria-label="Refresh datasets">
               <RefreshCw className={`size-4 ${datasetsLoading ? "spin" : ""}`} />
@@ -240,8 +263,15 @@ function RunComposer({ options, activeCount, onCreated }: { options: Options; ac
         </Field>
         {datasetError && <div className="dataset-load-error" role="alert"><AlertTriangle className="size-3.5" />{datasetError}</div>}
         {!datasetsLoading && !datasetError && datasets.length === 0 && <div className="dataset-empty">This source exposes no dataset candidates.</div>}
-        {selectedDataset && <div className="dataset-note"><Check className="size-3.5" />{selectedDataset.features.join(", ")} · {selectedDataset.splits.length} split{selectedDataset.splits.length === 1 ? "" : "s"}</div>}
-        {invalidDatasets.length > 0 && <div className="dataset-validation-errors" aria-label="Incompatible datasets">{invalidDatasets.map((item) => <div key={item.id}><strong>{item.label}</strong><span>{item.error}</span></div>)}</div>}
+        {selectedDataset && datasetValidation?.selectionKey !== selectionKey && <div className="dataset-note dataset-unchecked"><Database className="size-3.5" />Format compatibility will be checked when you run the evaluation.</div>}
+        {datasetValidation?.selectionKey === selectionKey && <div className={`dataset-note dataset-${datasetValidation.status}`} role={datasetValidation.status === "invalid" ? "alert" : "status"}>
+          {datasetValidation.status === "valid"
+            ? <Check className="size-3.5" />
+            : datasetValidation.status === "invalid"
+              ? <AlertTriangle className="size-3.5" />
+              : <RefreshCw className="size-3.5 spin" />}
+          {datasetValidation.message}
+        </div>}
         <Field label="Split">
           <Select disabled={!selectedDataset} value={config.split} onValueChange={(value) => update("split", value)}>
             <SelectTrigger><SelectValue placeholder="Select a split" /></SelectTrigger>
@@ -306,9 +336,9 @@ function RunComposer({ options, activeCount, onCreated }: { options: Options; ac
 
       {missingCredential && <div className="credential-error"><KeyRound className="size-4" />{missingPreprocessorCredential ? `${missingPreprocessorCredential} is missing on the server.` : `${provider?.label || "Provider"} credentials are missing on the server.`}</div>}
 
-      <Button type="submit" className="h-11 w-full" disabled={submitting || datasetsLoading || !selectedDataset?.valid || missingCredential || unsupportedMode}>
+      <Button type="submit" className="h-11 w-full" disabled={submitting || datasetsLoading || !selectedDataset || !config.split || missingCredential || unsupportedMode}>
         {submitting ? <RefreshCw className="size-4 spin" /> : <Play className="size-4 fill-current" />}
-        {submitting ? "Starting…" : "Run evaluation"}
+        {submitting ? "Checking dataset…" : "Run evaluation"}
       </Button>
     </form>
   )
@@ -339,9 +369,10 @@ function RunTable({ runs, onSelect }: { runs: Run[]; onSelect: (run: Run) => voi
   )
 }
 
-function RunDetail({ selected, open, onOpenChange, onUpdated }: { selected: Run | null; open: boolean; onOpenChange: (open: boolean) => void; onUpdated: (run: Run) => void }) {
+function RunDetail({ selected, open, onOpenChange, onUpdated, onRetried }: { selected: Run | null; open: boolean; onOpenChange: (open: boolean) => void; onUpdated: (run: Run) => void; onRetried: (run: Run) => void }) {
   const [run, setRun] = useState<Run | null>(selected)
   const [logs, setLogs] = useState("")
+  const [retrying, setRetrying] = useState(false)
   const selectedRef = useRef(selected)
   const onUpdatedRef = useRef(onUpdated)
   selectedRef.current = selected
@@ -351,6 +382,7 @@ function RunDetail({ selected, open, onOpenChange, onUpdated }: { selected: Run 
   useEffect(() => {
     setRun(selectedRef.current)
     setLogs("")
+    setRetrying(false)
     if (!selectedId || !open) return
     const events = new EventSource(`/api/runs/${selectedId}/events`)
     events.addEventListener("log", (event) => {
@@ -381,6 +413,20 @@ function RunDetail({ selected, open, onOpenChange, onUpdated }: { selected: Run 
       toast.success("Cancellation requested")
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not cancel run")
+    }
+  }
+
+  async function retry() {
+    if (!run) return
+    setRetrying(true)
+    try {
+      const retried = await api.retryRun(run.id)
+      toast.success("Evaluation restarted", { description: `${configuredModelLabel(retried.config.model_name)} · ${retried.id}` })
+      onRetried(retried)
+    } catch (error) {
+      toast.error("Could not retry evaluation", { description: error instanceof Error ? error.message : "Unknown error" })
+    } finally {
+      setRetrying(false)
     }
   }
 
@@ -427,7 +473,11 @@ function RunDetail({ selected, open, onOpenChange, onUpdated }: { selected: Run 
               <div className="artifact-list">{run.artifacts.map((artifact) => <a key={artifact} href={`/api/runs/${run.id}/artifacts/${artifact}`}><span>{artifact}</span><Download className="size-3.5" /></a>)}</div>
             </section>}
           </div>
-          {ACTIVE_STATES.has(run.status) && <div className="detail-footer"><Button variant="danger" onClick={cancel}><CircleStop className="size-4" />Cancel run</Button></div>}
+          <div className="detail-footer">
+            {ACTIVE_STATES.has(run.status)
+              ? <Button variant="danger" onClick={cancel}><CircleStop className="size-4" />Cancel run</Button>
+              : <Button onClick={retry} disabled={retrying}>{retrying ? <RefreshCw className="size-4 spin" /> : <RotateCcw className="size-4" />}{retrying ? "Starting…" : "Retry run"}</Button>}
+          </div>
         </>}
       </SheetContent>
     </Sheet>
@@ -507,7 +557,7 @@ export default function App() {
         </section>
       </main>
 
-      <RunDetail selected={selected} open={detailOpen} onOpenChange={setDetailOpen} onUpdated={updateRun} />
+      <RunDetail selected={selected} open={detailOpen} onOpenChange={setDetailOpen} onUpdated={updateRun} onRetried={(retried) => { setRuns((current) => [retried, ...current]); setSelected(retried) }} />
     </div>
   )
 }

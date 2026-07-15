@@ -8,6 +8,7 @@ from unittest import mock
 
 
 try:
+    from api.dataset_catalog import DatasetValidationError
     from fastapi.testclient import TestClient
     from api.ui_server import RunCreate, RunManager, RunStore, create_app, options_payload
 except ImportError as exc:  # pragma: no cover - reported clearly in minimal envs
@@ -67,10 +68,15 @@ class UiServerTest(unittest.TestCase):
         self.runner = self.root / "fake_runner.py"
         self.runner.write_text(FAKE_RUNNER, encoding="utf-8")
         self.store = RunStore(self.root / "runs")
+        self.dataset_validation_patcher = mock.patch(
+            "api.ui_server.validate_dataset_selection", return_value={"features": ["audio", "text"], "splits": ["test"]}
+        )
+        self.dataset_validation = self.dataset_validation_patcher.start()
         self.manager = RunManager(self.store, runner_path=self.runner)
 
     def tearDown(self):
         self.tempdir.cleanup()
+        self.dataset_validation_patcher.stop()
 
     def request(self, **overrides):
         values = {
@@ -99,6 +105,7 @@ class UiServerTest(unittest.TestCase):
             ["huggingface", "local"],
         )
 
+        self.assertEqual(payload["dataset_sources"][0]["description"], "2 configured repositories")
     def test_validation_rejects_incompatible_url_mode(self):
         with self.assertRaisesRegex(ValueError, "URL mode"):
             self.request(use_url=True, audio_preprocessor="arctan")
@@ -137,6 +144,19 @@ class UiServerTest(unittest.TestCase):
 
         self.assertEqual(
             command[command.index("--dataset_source") + 1], "huggingface"
+        )
+
+    def test_run_request_validates_only_the_selected_dataset(self):
+        request = self.request(dataset_path="owner/selected", dataset="config", split="validation")
+        with mock.patch.dict(os.environ, {"DEEPGRAM_API_KEY": "configured"}):
+            run = self.manager.start(request)
+        wait_for(self.store, run["id"], {"completed"})
+
+        self.dataset_validation.assert_called_with(
+            "huggingface",
+            "owner/selected",
+            "config",
+            "validation",
         )
 
     def test_sarvam_is_exposed_with_credential_status(self):
@@ -218,6 +238,32 @@ class UiServerTest(unittest.TestCase):
         self.assertEqual(first_done["config"]["vad_position"], "pre")
         self.assertEqual(second_done["config"]["vad_position"], "post")
 
+    def test_retry_endpoint_creates_a_new_run_with_the_same_configuration(self):
+        with mock.patch.dict(os.environ, {"DEEPGRAM_API_KEY": "configured"}):
+            original = self.manager.start(self.request(vad_position="pre"))
+        original = wait_for(self.store, original["id"], {"completed"})
+        app = create_app(
+            results_root=self.root / "runs",
+            runner_path=self.runner,
+            web_dist=self.root / "missing-dist",
+        )
+
+        with mock.patch.dict(os.environ, {"DEEPGRAM_API_KEY": "configured"}):
+            response = TestClient(app).post(f"/api/runs/{original['id']}/retry")
+
+        self.assertEqual(response.status_code, 201)
+        retried = response.json()
+        self.assertNotEqual(retried["id"], original["id"])
+        self.assertEqual(retried["config"], original["config"])
+        completed = wait_for(app.state.store, retried["id"], {"completed"})
+        self.assertNotEqual(completed["output_dir"], original["output_dir"])
+        self.assertEqual(len(app.state.store.list()), 2)
+
+    def test_retry_rejects_an_active_run(self):
+        self.store.create("active", self.request().model_dump(), self.root / "active")
+        with self.assertRaisesRegex(RuntimeError, "Only finished runs"):
+            self.manager.retry("active")
+
     def test_cancel_stops_active_process(self):
         with mock.patch.dict(os.environ, {"DEEPGRAM_API_KEY": "configured"}):
             run = self.manager.start(self.request(dataset_path="slow/dataset"))
@@ -258,6 +304,31 @@ class UiServerTest(unittest.TestCase):
         response = TestClient(app).get("/api/datasets?source_id=unknown")
 
         self.assertEqual(response.status_code, 404)
+
+    def test_api_reports_dataset_incompatibility_before_creating_run(self):
+        app = create_app(
+            results_root=self.root / "incompatible-runs",
+            runner_path=self.runner,
+            web_dist=self.root / "missing-dist",
+        )
+        message = (
+            "This dataset does not follow the required format expected by the "
+            "evaluator and cannot be selected: missing required 'audio' column."
+        )
+        with mock.patch(
+            "api.ui_server.validate_dataset_selection",
+            side_effect=DatasetValidationError(message),
+        ), mock.patch.dict(os.environ, {"DEEPGRAM_API_KEY": "configured"}):
+            response = TestClient(app).post(
+                "/api/runs", json=self.request().model_dump()
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["detail"],
+            {"code": "dataset_incompatible", "message": message},
+        )
+        self.assertEqual(app.state.store.list(), [])
 
     def test_api_rejects_artifact_path_traversal(self):
         app = create_app(

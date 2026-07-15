@@ -19,7 +19,12 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
-from api.dataset_catalog import dataset_catalog, source_options
+from api.dataset_catalog import (
+    DatasetValidationError,
+    dataset_catalog,
+    source_options,
+    validate_dataset_selection,
+)
 from api.language_catalog import MODEL_LANGUAGES, effective_mode, language_options
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -290,6 +295,12 @@ class RunManager:
 
     def start(self, request: RunCreate) -> dict:
         self._validate_credentials(request)
+        validate_dataset_selection(
+            request.dataset_source,
+            request.dataset_path,
+            request.dataset,
+            request.split,
+        )
         run_id = uuid.uuid4().hex[:12]
         output_dir = self.store.root / run_id
         output_dir.mkdir(parents=True, exist_ok=False)
@@ -303,6 +314,15 @@ class RunManager:
         )
         thread.start()
         return self.store.get(run_id)
+
+    def retry(self, run_id: str) -> dict:
+        original = self.store.get(run_id)
+        if original is None:
+            raise KeyError(run_id)
+        if original["status"] not in TERMINAL_STATES:
+            raise RuntimeError("Only finished runs can be retried")
+        request = RunCreate.model_validate(original["config"])
+        return self.start(request)
 
     def _validate_credentials(self, request: RunCreate):
         prefix = request.model_name.split("/", 1)[0]
@@ -591,6 +611,11 @@ def create_app(
     def create_run(request: RunCreate):
         try:
             return manager.start(request)
+        except DatasetValidationError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "dataset_incompatible", "message": str(exc)},
+            ) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -612,8 +637,25 @@ def create_app(
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="Run not found") from exc
 
+    @app.post("/api/runs/{run_id}/retry", status_code=201)
+    def retry_run(run_id: str):
+        try:
+            return manager.retry(run_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Run not found") from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except DatasetValidationError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "dataset_incompatible", "message": str(exc)},
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.get("/api/runs/{run_id}/events")
     async def run_events(run_id: str):
+
         if store.get(run_id) is None:
             raise HTTPException(status_code=404, detail="Run not found")
 

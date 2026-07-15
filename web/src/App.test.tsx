@@ -20,7 +20,7 @@ const options = {
   ],
   preprocessors: ["none", "arctan", "rnnoise"],
   vad_positions: ["none", "pre", "post"],
-  dataset_sources: [{ id: "huggingface", label: "Hugging Face", kind: "huggingface", description: "bettercallaaryan/nc_agent_clips_openasr" }, { id: "local", label: "Local datasets", kind: "local", description: "/home/ubuntu/dataset" }],
+  dataset_sources: [{ id: "huggingface", label: "Hugging Face", kind: "huggingface", description: "2 configured repositories" }, { id: "local", label: "Local datasets", kind: "local", description: "/home/ubuntu/dataset" }],
   credentials: { DEEPGRAM_API_KEY: true, SARVAM_API_KEY: true, ARCTAN_SDK_KEY: true, HF_TOKEN: true },
   defaults: { dataset_source: "huggingface", model_name: "deepgram/nova-3", dataset: "default", split: "test", max_workers: 4 },
 }
@@ -76,13 +76,13 @@ describe("Open ASR console", () => {
       if (path === "/api/datasets?source_id=huggingface") return jsonResponse({
         source_id: "huggingface",
         datasets: [
-          { id: "default", label: "default", dataset_source: "huggingface", dataset_path: createdRun.config.dataset_path, dataset: "default", splits: ["test", "validation"], features: ["audio", "text"], valid: true, error: null },
-          { id: "broken", label: "broken", dataset_source: "huggingface", dataset_path: createdRun.config.dataset_path, dataset: "broken", splits: ["test"], features: ["text"], valid: false, error: "This dataset does not follow the required format expected by the evaluator and cannot be selected: missing required 'audio' column." },
+          { id: `${createdRun.config.dataset_path}::default`, label: "nc_agent_clips_openasr · default", dataset_source: "huggingface", dataset_path: createdRun.config.dataset_path, dataset: "default", splits: ["test", "validation"], features: [], valid: null, error: null, validation_status: "unchecked" },
+          { id: "bettercallaaryan/acefone_stt_eval_openasr::default", label: "acefone_stt_eval_openasr · default", dataset_source: "huggingface", dataset_path: "bettercallaaryan/acefone_stt_eval_openasr", dataset: "default", splits: ["test"], features: [], valid: null, error: null, validation_status: "unchecked" },
         ],
       })
       if (path === "/api/datasets?source_id=local") return jsonResponse({
         source_id: "local",
-        datasets: [{ id: "Acefone", label: "Acefone", dataset_source: "local", dataset_path: "Acefone", dataset: "default", splits: ["test"], features: ["audio", "text"], valid: true, error: null }],
+        datasets: [{ id: "Acefone", label: "Acefone", dataset_source: "local", dataset_path: "Acefone", dataset: "default", splits: ["test"], features: [], valid: null, error: null, validation_status: "unchecked" }],
       })
       return jsonResponse({ detail: "not found" }, 404)
     }))
@@ -108,6 +108,42 @@ describe("Open ASR console", () => {
     expect((await screen.findAllByText("deepgram/nova-3")).length).toBeGreaterThan(0)
     const createCall = vi.mocked(fetch).mock.calls.find(([path, init]) => path === "/api/runs" && init?.method === "POST")
     expect(JSON.parse(String(createCall?.[1]?.body))).toEqual(expect.objectContaining({ dataset_source: "huggingface", language: "en" }))
+  })
+
+  it("retries a finished run from its detail panel", async () => {
+    const user = userEvent.setup()
+    const completedRun = {
+      ...createdRun,
+      status: "completed",
+      finished_at: "2026-07-10T00:01:00Z",
+      summary: { wer_percent: 12.5, rtfx: 20, num_samples: 1 },
+    }
+    const retriedRun = {
+      ...createdRun,
+      id: "retry456",
+      created_at: "2026-07-10T00:02:00Z",
+    }
+    const fallback = vi.mocked(fetch).getMockImplementation()!
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === "/api/runs" && !init?.method) return jsonResponse([completedRun])
+      if (path === `/api/runs/${createdRun.id}/retry` && init?.method === "POST") {
+        return jsonResponse(retriedRun, 201)
+      }
+      return fallback(input, init)
+    })
+    render(<App />)
+
+    await user.click(await screen.findByRole("row", { name: /deepgram\/nova-3/ }))
+    await user.click(await screen.findByRole("button", { name: "Retry run" }))
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        `/api/runs/${createdRun.id}/retry`,
+        expect.objectContaining({ method: "POST" }),
+      )
+    })
+    expect((await screen.findAllByText("retry456")).length).toBeGreaterThan(0)
   })
 
   it("shows the stable Assembly alias and live provider model", async () => {
@@ -136,22 +172,46 @@ describe("Open ASR console", () => {
     expect((await screen.findAllByText(/assembly\/universal-3-5-pro · 3/)).length).toBeGreaterThan(0)
   })
 
-  it("loads schema-valid datasets and disables incompatible entries", async () => {
+  it("lists Acefone immediately without pre-validating or disabling it", async () => {
     const user = userEvent.setup()
     render(<App />)
 
-    expect(await screen.findByText(/audio, text/)).toBeInTheDocument()
+    expect(await screen.findByText(/Format compatibility will be checked/)).toBeInTheDocument()
     await user.click(screen.getByRole("combobox", { name: "Dataset" }))
-    const broken = await screen.findByRole("option", { name: /broken · incompatible/ })
-    expect(broken).toHaveAttribute("data-disabled")
-    expect(screen.getByText(/missing required 'audio' column/)).toBeInTheDocument()
+    const acefone = await screen.findByRole("option", { name: "acefone_stt_eval_openasr · default" })
+    expect(acefone).not.toHaveAttribute("data-disabled")
+  })
+
+  it("shows incompatibility only after the selected run is requested", async () => {
+    const user = userEvent.setup()
+    const fallback = vi.mocked(fetch).getMockImplementation()!
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === "/api/runs" && init?.method === "POST") {
+        return jsonResponse({
+          detail: {
+            code: "dataset_incompatible",
+            message: "This dataset does not follow the required format expected by the evaluator and cannot be selected: missing required 'audio' column.",
+          },
+        }, 400)
+      }
+      return fallback(input, init)
+    })
+    render(<App />)
+
+    await screen.findByText(/Format compatibility will be checked/)
+    await user.click(screen.getByRole("combobox", { name: "Dataset" }))
+    await user.click(await screen.findByRole("option", { name: "acefone_stt_eval_openasr · default" }))
+    expect(screen.queryByText(/missing required 'audio' column/)).not.toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "Run evaluation" }))
+
+    expect(await screen.findByText(/missing required 'audio' column/)).toBeInTheDocument()
   })
 
   it("selects an available dataset split", async () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await screen.findByText(/2 splits/)
+    await screen.findByText(/Format compatibility will be checked/)
     await user.click(screen.getByRole("combobox", { name: "Split" }))
     await user.click(await screen.findByRole("option", { name: "validation" }))
 
@@ -162,7 +222,7 @@ describe("Open ASR console", () => {
     const user = userEvent.setup()
     render(<App />)
 
-    await screen.findByText(/audio, text/)
+    await screen.findByText(/Format compatibility will be checked/)
     await user.click(screen.getByRole("combobox", { name: "Source" }))
     await user.click(await screen.findByRole("option", { name: /Local datasets/ }))
 
