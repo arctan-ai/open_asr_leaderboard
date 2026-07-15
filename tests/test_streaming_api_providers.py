@@ -224,6 +224,70 @@ def load_run_eval(module_name):
 
 
 class StreamingProviderTest(unittest.TestCase):
+    def test_rate_limit_classifier_handles_http_websocket_and_nested_errors(self):
+        providers = load_providers()
+
+        http_error = RuntimeError("request failed")
+        http_error.response = types.SimpleNamespace(status_code=429)
+        self.assertTrue(providers.is_rate_limit_error(http_error))
+
+        websocket_error = RuntimeError(
+            "received 1003 (unsupported data) Rate limit exceeded. "
+            "Visit the API Dashboard to review and manage your subscription."
+        )
+        self.assertTrue(providers.is_rate_limit_error(websocket_error))
+
+        try:
+            try:
+                raise RuntimeError("quota exhausted")
+            except RuntimeError as cause:
+                raise RuntimeError("provider failed") from cause
+        except RuntimeError as nested_error:
+            self.assertTrue(providers.is_rate_limit_error(nested_error))
+
+        self.assertFalse(providers.is_rate_limit_error(TimeoutError("timed out")))
+
+    def test_rate_limit_is_not_retried_in_both_runners(self):
+        for module_name in ("run_eval", "run_eval_ml"):
+            with self.subTest(module_name=module_name):
+                runner = load_run_eval(module_name)
+                provider = mock.Mock()
+                provider.force_streaming_for_model.return_value = False
+                provider.transcribe.side_effect = RuntimeError("Rate limit exceeded")
+                stop_event = mock.Mock()
+                stop_event.is_set.return_value = False
+
+                with mock.patch.object(
+                    runner, "get_provider", return_value=(provider, "model")
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "Rate limit exceeded"):
+                        runner.transcribe_with_retry(
+                            "vendor/model",
+                            None,
+                            {},
+                            use_url=True,
+                            stop_event=stop_event,
+                        )
+
+                provider.transcribe.assert_called_once()
+                stop_event.set.assert_called_once()
+
+    def test_transient_error_keeps_retrying(self):
+        run_eval = load_run_eval("run_eval")
+        provider = mock.Mock()
+        provider.force_streaming_for_model.return_value = False
+        provider.transcribe.side_effect = [TimeoutError("temporary"), "ok"]
+
+        with mock.patch.object(
+            run_eval, "get_provider", return_value=(provider, "model")
+        ), mock.patch.object(run_eval.time, "sleep"):
+            result = run_eval.transcribe_with_retry(
+                "vendor/model", None, {}, use_url=True
+            )
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(provider.transcribe.call_count, 2)
+
     def test_streaming_routes_to_provider_streaming_method(self):
         run_eval = load_run_eval("run_eval")
 

@@ -79,14 +79,17 @@ for model_cfg in "${MODEL_CONFIGS[@]}"; do
             PROMPT_ARGS=(--prompt "Output must be in lexical format.")
         fi
 
-        python run_eval.py \
+        if ! python run_eval.py \
             --dataset_path="$DATASET_PATH" \
             --dataset="$DATASET" \
             --split="$SPLIT" \
             --model_name "$MODEL_ID" \
             --max_workers "$MAX_WORKERS" \
             ${USE_URL_FLAG} \
-            "${PROMPT_ARGS[@]}"
+            "${PROMPT_ARGS[@]}"; then
+            echo "Evaluation failed for ${MODEL_ID} on ${DATASET}:${SPLIT}; stopping batch."
+            exit 1
+        fi
     done
 
     MODEL_RESULTS_DIR="${RUNDIR}/results/${MODEL_FOLDER}"

@@ -20,8 +20,9 @@ from tqdm import tqdm
 from dotenv import load_dotenv
 from normalizer import data_utils
 import concurrent.futures
+import threading
 from datetime import datetime, timezone
-from providers import get_provider, PermanentError
+from providers import get_provider, PermanentError, is_rate_limit_error
 
 load_dotenv()
 
@@ -80,6 +81,7 @@ def transcribe_with_retry(
     streaming=False,
     language="en",
     prompt=None,
+    stop_event=None,
 ):
     provider, variant = get_provider(model_name)
     effective_streaming = streaming or provider.force_streaming_for_model(variant)
@@ -91,6 +93,8 @@ def transcribe_with_retry(
         kwargs["prompt"] = prompt
     retries = 0
     while retries <= max_retries:
+        if stop_event is not None and stop_event.is_set():
+            raise RuntimeError("Transcription cancelled after rate limit failure")
         try:
             transcribe_fn = (
                 provider.transcribe_streaming
@@ -98,9 +102,15 @@ def transcribe_with_retry(
                 else provider.transcribe
             )
             return transcribe_fn(variant, audio_file_path, sample, **kwargs)
-        except PermanentError:
+        except PermanentError as e:
+            if is_rate_limit_error(e) and stop_event is not None:
+                stop_event.set()
             raise
         except Exception as e:
+            if is_rate_limit_error(e):
+                if stop_event is not None:
+                    stop_event.set()
+                raise
             retries += 1
             if retries > max_retries:
                 raise e
@@ -161,11 +171,14 @@ def transcribe_dataset(
         "audio_length_s": [],
         "transcription_time_s": [],
     }
+    stop_event = threading.Event()
 
     mode = "streaming" if effective_streaming else "static"
     print(f"Transcribing with model: {model_name}, language: {language} ({mode})")
 
     def process_sample(sample):
+        if stop_event.is_set():
+            return None
         if use_url:
             reference = sample["row"]["text"].strip() or " "
             audio_duration = sample["row"]["audio_length_s"]
@@ -179,8 +192,12 @@ def transcribe_dataset(
                     streaming=effective_streaming,
                     language=language,
                     prompt=prompt,
+                    stop_event=stop_event,
                 )
             except Exception as e:
+                if is_rate_limit_error(e):
+                    stop_event.set()
+                    raise
                 print(f"Failed to transcribe after retries: {e}")
                 transcription = ""
 
@@ -208,8 +225,12 @@ def transcribe_dataset(
                     streaming=effective_streaming,
                     language=language,
                     prompt=prompt,
+                    stop_event=stop_event,
                 )
             except Exception as e:
+                if is_rate_limit_error(e):
+                    stop_event.set()
+                    raise
                 print(f"Failed to transcribe after retries: {e}")
                 transcription = ""
             finally:
@@ -228,9 +249,16 @@ def transcribe_dataset(
             total=len(future_to_sample),
             desc="Transcribing",
         ):
-            reference, transcription, audio_duration, transcription_time = (
-                future.result()
-            )
+            try:
+                result = future.result()
+            except Exception:
+                stop_event.set()
+                for pending in future_to_sample:
+                    pending.cancel()
+                raise
+            if result is None:
+                continue
+            reference, transcription, audio_duration, transcription_time = result
             results["predictions"].append(transcription)
             results["references"].append(reference)
             results["audio_length_s"].append(audio_duration)

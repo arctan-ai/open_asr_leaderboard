@@ -68,25 +68,22 @@ run_evaluation() {
     echo "   Time: $(date)"
     echo "----------------------------------------"
 
-    python run_eval_ml.py \
+    if ! python run_eval_ml.py \
         --dataset_path="$DATASET_PATH" \
         --config_name="$config_name" \
         --language="$language" \
         --split="test" \
         --model_name="$model_id" \
         --max_workers="$MAX_WORKERS" \
-        "${prompt_args[@]}"
-
-    local exit_code=$?
-
-    if [ $exit_code -eq 0 ]; then
-        echo "Evaluation completed successfully for $config_name"
-    else
-        echo "Evaluation failed for $config_name (exit code: $exit_code)"
+        "${prompt_args[@]}"; then
+        echo "Evaluation failed for $config_name; stopping batch."
+        return 1
     fi
 
+    echo "Evaluation completed successfully for $config_name"
+
     echo "----------------------------------------"
-    return $exit_code
+    return 0
 }
 
 # Main execution
@@ -112,7 +109,10 @@ for MODEL_ID in "${MODEL_IDs[@]}"; do
             echo ""
 
             for language in $languages; do
-                run_evaluation "$MODEL_ID" "$dataset" "$language"
+                if ! run_evaluation "$MODEL_ID" "$dataset" "$language"; then
+                    echo "Stopping multilingual batch after evaluation failure."
+                    exit 1
+                fi
             done
         fi
     done

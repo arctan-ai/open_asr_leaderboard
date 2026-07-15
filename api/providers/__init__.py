@@ -2,10 +2,43 @@ from abc import ABC, abstractmethod
 from typing import Optional
 
 
+_RATE_LIMIT_MARKERS = (
+    "rate limit",
+    "rate-limit",
+    "rate_limit",
+    "too many requests",
+    "quota exceeded",
+    "quota exhausted",
+    "subscription exceeded",
+    "subscription limit",
+)
+
+
 class PermanentError(Exception):
     """Error that should not be retried (e.g., URL fetch failure)."""
 
     pass
+
+
+def is_rate_limit_error(error: BaseException) -> bool:
+    """Return whether an exception chain represents exhausted API capacity."""
+    seen = set()
+    current = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+
+        status_code = getattr(current, "status_code", None)
+        response = getattr(current, "response", None)
+        if status_code == 429 or getattr(response, "status_code", None) == 429:
+            return True
+
+        message = str(current).lower()
+        if any(marker in message for marker in _RATE_LIMIT_MARKERS):
+            return True
+
+        current = current.__cause__ or current.__context__
+
+    return False
 
 
 class APIProvider(ABC):
