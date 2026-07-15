@@ -1,6 +1,13 @@
 import argparse
 import json
 from typing import Optional
+from pathlib import Path
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 import datasets
 import evaluate
 import soundfile as sf
@@ -14,7 +21,6 @@ from dotenv import load_dotenv
 from normalizer import data_utils
 import concurrent.futures
 from datetime import datetime, timezone
-from pathlib import Path
 from providers import get_provider, PermanentError
 
 load_dotenv()

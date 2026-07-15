@@ -16,6 +16,7 @@ dependencies = [
     "num2words>=0.5.14",
     "openai>=2.44.0",
     "peft>=0.19.1",
+    "pyrnnoise>=0.4.3",
     "python-dotenv>=1.2.2",
     "requests-toolbelt>=1.0.0",
     "rev-ai>=2.21.0",
@@ -28,4 +29,4 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-arctan-vi = { path = "../arctan-vi-sdk/dist/arctan_vi-0.7.0-cp314-cp314-linux_x86_64.whl" }
+arctan-vi = { path = "../arctan-vi-runtime/dist/arctan_vi-0.8.0-cp314-cp314-linux_x86_64.whl" }

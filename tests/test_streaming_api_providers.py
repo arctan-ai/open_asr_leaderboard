@@ -474,6 +474,22 @@ class StreamingProviderTest(unittest.TestCase):
 
         self.assertEqual(transcript, "hello world")
 
+    def test_soniox_streaming_model_typo_fails_with_hint(self):
+        load_providers()
+        from providers import PermanentError, soniox_provider
+
+        provider = soniox_provider.SonioxProvider()
+        with mock.patch.dict(os.environ, {"SONIOX_API_KEY": "key"}):
+            with self.assertRaisesRegex(
+                PermanentError,
+                "Did you mean 'stt-rt-v5'",
+            ):
+                provider.transcribe_streaming(
+                    "stt-rtt-v5",
+                    "/tmp/audio.wav",
+                    {},
+                )
+
     def test_assembly_collects_final_turns(self):
         load_providers()
         from providers import assemblyai_provider

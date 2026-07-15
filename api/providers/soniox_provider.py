@@ -13,6 +13,7 @@ SONIOX_API_BASE_URL = "https://api.soniox.com"
 SONIOX_STREAMING_ENDPOINT = "wss://stt-rt.soniox.com/transcribe-websocket"
 DEFAULT_MODEL = "stt-async-v5"
 STREAMING_MODEL_MAP = {"stt-async-v5": "stt-rt-v5"}
+COMMON_MODEL_TYPOS = {"stt-rtt-v5": "stt-rt-v5"}
 STREAMING_CHUNK_MS = 100
 POLL_INTERVAL_S = 1
 POLL_TIMEOUT_S = 600
@@ -26,6 +27,16 @@ def _render_tokens(tokens: list[dict]) -> str:
         if str(token.get("text", "")) and str(token.get("text", "")) != "<end>"
     )
     return " ".join(text.split())
+
+
+def _resolve_streaming_model(model_variant: str) -> str:
+    requested_model = model_variant or DEFAULT_MODEL
+    if requested_model in COMMON_MODEL_TYPOS:
+        raise PermanentError(
+            f"Unknown Soniox streaming model '{requested_model}'. "
+            f"Did you mean '{COMMON_MODEL_TYPOS[requested_model]}'?"
+        )
+    return STREAMING_MODEL_MAP.get(requested_model, requested_model)
 
 
 def _raise_for_permanent_client_error(response: requests.Response) -> None:
@@ -244,7 +255,7 @@ class SonioxProvider(APIProvider):
         if not api_key or api_key == "your_api_key":
             raise ValueError("SONIOX_API_KEY environment variable not set")
 
-        model = STREAMING_MODEL_MAP.get(model_variant or DEFAULT_MODEL, model_variant)
+        model = _resolve_streaming_model(model_variant)
         return (
             asyncio.run(
                 _transcribe_streaming(
