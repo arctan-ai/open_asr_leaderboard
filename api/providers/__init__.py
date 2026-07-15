@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import Optional
 
 
@@ -18,6 +19,31 @@ class PermanentError(Exception):
     """Error that should not be retried (e.g., URL fetch failure)."""
 
     pass
+
+
+@dataclass(frozen=True)
+class ProviderTranscription:
+    """Provider text plus auditable information about the ASR that produced it."""
+
+    text: str
+    actual_model: str | None = None
+    detected_languages: tuple[str, ...] = field(default_factory=tuple)
+
+
+def as_provider_transcription(
+    value: str | ProviderTranscription,
+    *,
+    fallback_model: str,
+) -> ProviderTranscription:
+    if isinstance(value, ProviderTranscription):
+        if value.actual_model:
+            return value
+        return ProviderTranscription(
+            text=value.text,
+            actual_model=fallback_model,
+            detected_languages=value.detected_languages,
+        )
+    return ProviderTranscription(text=value, actual_model=fallback_model)
 
 
 def is_rate_limit_error(error: BaseException) -> bool:
@@ -51,7 +77,7 @@ class APIProvider(ABC):
         use_url: bool = False,
         language: str = "en",
         prompt: Optional[str] = None,
-    ) -> str:
+    ) -> str | ProviderTranscription:
         """Transcribe audio and return the text."""
         ...
 
@@ -63,7 +89,7 @@ class APIProvider(ABC):
         use_url: bool = False,
         language: str = "en",
         prompt: Optional[str] = None,
-    ) -> str:
+    ) -> str | ProviderTranscription:
         """Transcribe audio through a streaming ASR endpoint and return the text."""
         raise PermanentError(
             f"Streaming ASR is not supported for {self.__class__.__name__}"

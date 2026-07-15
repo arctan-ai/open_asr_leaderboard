@@ -83,6 +83,20 @@ function pipelineLabel(run: Run) {
   return pieces.length ? pieces.join(" → ") : "Raw audio"
 }
 
+function configuredModelLabel(modelName: string) {
+  return modelName === "assembly/universal-stt" ? "Assembly Universal STT" : modelName
+}
+
+function observedCounts(run: Run, key: "actual_models" | "detected_languages") {
+  return run.progress?.[key] || run.summary?.[key] || {}
+}
+
+function countLabel(counts: Record<string, number>) {
+  const entries = Object.entries(counts)
+  if (!entries.length) return "Waiting for provider response…"
+  return entries.map(([name, count]) => `${name} · ${count}`).join("  |  ")
+}
+
 function elapsed(run: Run) {
   const start = run.started_at || run.created_at
   const end = run.finished_at || new Date().toISOString()
@@ -154,7 +168,7 @@ function RunComposer({ options, activeCount, onCreated }: { options: Options; ac
     setSubmitting(true)
     try {
       const run = await api.createRun(config)
-      toast.success("Evaluation started", { description: `${run.config.model_name} · ${run.id}` })
+      toast.success("Evaluation started", { description: `${configuredModelLabel(run.config.model_name)} · ${run.id}` })
       onCreated(run)
     } catch (error) {
       toast.error("Could not start evaluation", { description: error instanceof Error ? error.message : "Unknown error" })
@@ -269,7 +283,7 @@ function RunTable({ runs, onSelect }: { runs: Run[]; onSelect: (run: Run) => voi
         <tbody>{runs.map((run) => (
           <tr key={run.id} onClick={() => onSelect(run)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") onSelect(run) }}>
             <td><StatusBadge status={run.status} /></td>
-            <td><div className="cell-primary">{run.config.model_name}</div><div className="cell-secondary">{run.id}</div></td>
+            <td><div className="cell-primary">{configuredModelLabel(run.config.model_name)}</div><div className="cell-secondary">{Object.keys(observedCounts(run, "actual_models")).length ? countLabel(observedCounts(run, "actual_models")) : run.id}</div></td>
             <td><div className="cell-primary truncate-cell">{run.config.dataset_path}</div><div className="cell-secondary">{run.config.dataset} · {run.config.split}</div></td>
             <td><span className="pipeline-cell">{pipelineLabel(run)}</span></td>
             <td className="metric-cell">{run.summary?.wer_percent != null ? `${run.summary.wer_percent}%` : "—"}</td>
@@ -308,6 +322,11 @@ function RunDetail({ selected, open, onOpenChange, onUpdated }: { selected: Run 
       if (ACTIVE_STATES.has(updated.status)) return
       events.close()
     })
+    events.addEventListener("progress", (event) => {
+      const updated = JSON.parse((event as MessageEvent).data) as Run
+      setRun(updated)
+      onUpdatedRef.current(updated)
+    })
     return () => events.close()
   }, [selectedId, open])
 
@@ -329,7 +348,7 @@ function RunDetail({ selected, open, onOpenChange, onUpdated }: { selected: Run 
         {run && <>
           <SheetHeader>
             <div className="mb-3 flex items-center gap-2"><StatusBadge status={run.status} /><span className="font-mono text-xs text-muted-foreground">{run.id}</span></div>
-            <SheetTitle>{run.config.model_name}</SheetTitle>
+            <SheetTitle>{configuredModelLabel(run.config.model_name)}</SheetTitle>
             <SheetDescription>{run.config.dataset_path} · {run.config.dataset}/{run.config.split}</SheetDescription>
           </SheetHeader>
           <div className="detail-scroll">
@@ -347,6 +366,9 @@ function RunDetail({ selected, open, onOpenChange, onUpdated }: { selected: Run 
                 <div><dt>Workers</dt><dd>{run.config.max_workers}</dd></div>
                 <div><dt>Mode</dt><dd>{run.config.streaming ? "Streaming" : "Static"}</dd></div>
                 <div><dt>Language</dt><dd>{run.config.language}</dd></div>
+                <div><dt>Using ASR</dt><dd>{countLabel(observedCounts(run, "actual_models"))}</dd></div>
+                {Object.keys(observedCounts(run, "detected_languages")).length > 0 && <div><dt>Detected languages</dt><dd>{countLabel(observedCounts(run, "detected_languages"))}</dd></div>}
+                {run.progress && <div><dt>Progress</dt><dd>{run.progress.completed_samples}/{run.progress.total_samples ?? "?"}</dd></div>}
                 <div><dt>Samples</dt><dd>{run.config.max_samples ?? "Full split"}</dd></div>
               </dl>
             </section>
@@ -436,7 +458,7 @@ export default function App() {
             <div className="hero-stats"><div><Activity /><span>Active</span><strong>{activeRuns.length}</strong></div><div><Clock3 /><span>History</span><strong>{completedRuns.length}</strong></div></div>
           </div>
 
-          {activeRuns.length > 0 && <div className="active-strip"><div className="pulse-orb" /><span>{activeRuns.length} evaluation{activeRuns.length === 1 ? " is" : "s are"} running in parallel</span><span className="active-models">{activeRuns.map((run) => run.config.model_name).join(" · ")}</span></div>}
+          {activeRuns.length > 0 && <div className="active-strip"><div className="pulse-orb" /><span>{activeRuns.length} evaluation{activeRuns.length === 1 ? " is" : "s are"} running in parallel</span><span className="active-models">{activeRuns.map((run) => `${configuredModelLabel(run.config.model_name)}: ${countLabel(observedCounts(run, "actual_models"))}`).join(" · ")}</span></div>}
 
           <div className="runs-heading"><div><h3>Run history</h3><p>Newest first · updates automatically</p></div><Button variant="outline" size="sm" onClick={refresh}><RefreshCw className="size-3.5" />Refresh</Button></div>
           <RunTable runs={runs} onSelect={(run) => { setSelected(run); setDetailOpen(true) }} />

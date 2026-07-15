@@ -24,7 +24,12 @@ from normalizer.eval_utils import normalize_compound_pairs
 import concurrent.futures
 import threading
 from datetime import datetime, timezone
-from providers import get_provider, PermanentError, is_rate_limit_error
+from providers import (
+    PermanentError,
+    as_provider_transcription,
+    get_provider,
+    is_rate_limit_error,
+)
 
 load_dotenv()
 
@@ -101,7 +106,8 @@ def transcribe_with_retry(
                 if effective_streaming
                 else provider.transcribe
             )
-            return transcribe_fn(variant, audio_file_path, sample, **kwargs)
+            result = transcribe_fn(variant, audio_file_path, sample, **kwargs)
+            return as_provider_transcription(result, fallback_model=model_name)
         except PermanentError as e:
             if is_rate_limit_error(e) and stop_event is not None:
                 stop_event.set()
@@ -258,7 +264,7 @@ def transcribe_dataset(
                 raise
             if result:
                 reference, transcription, audio_duration, transcription_time = result
-                results["predictions"].append(transcription)
+                results["predictions"].append(transcription.text)
                 results["references"].append(reference)
                 results["audio_length_s"].append(audio_duration)
                 results["transcription_time_s"].append(transcription_time)

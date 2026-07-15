@@ -5,7 +5,7 @@ from typing import Optional
 
 import assemblyai as aai
 
-from . import APIProvider, PermanentError, register
+from . import APIProvider, PermanentError, ProviderTranscription, register
 from .streaming_utils import (
     build_query_url,
     compact_text,
@@ -15,7 +15,14 @@ from .streaming_utils import (
 
 
 ASSEMBLY_STREAMING_ENDPOINT = "wss://streaming.assemblyai.com/v3/ws"
-STREAMING_MODEL_MAP = {"universal-3-pro": "universal-3-5-pro"}
+ASSEMBLY_ALIAS = "universal-stt"
+LEGACY_ASSEMBLY_ALIAS = "universal-3-pro"
+PRIMARY_MODEL = "universal-3-5-pro"
+FALLBACK_MODEL = "universal-2"
+STREAMING_MODEL_MAP = {
+    ASSEMBLY_ALIAS: PRIMARY_MODEL,
+    LEGACY_ASSEMBLY_ALIAS: PRIMARY_MODEL,
+}
 STREAMING_CHUNK_MS = 50
 TERMINATION_TIMEOUT_S = 30
 
@@ -24,11 +31,17 @@ async def _transcribe_streaming(
     audio_file_path: str,
     api_key: str,
     model: str,
-) -> str:
+) -> ProviderTranscription:
     transcripts = []
+    actual_model = model
+    detected_languages: set[str] = set()
     url = build_query_url(
         ASSEMBLY_STREAMING_ENDPOINT,
-        {"sample_rate": "16000", "speech_model": model},
+        {
+            "sample_rate": "16000",
+            "speech_model": model,
+            "language_detection": "true",
+        },
     )
 
     async with connect_websocket(url, headers={"Authorization": api_key}) as ws:
@@ -40,16 +53,37 @@ async def _transcribe_streaming(
                 except json.JSONDecodeError:
                     continue
 
-                if data.get("type") == "Termination":
-                    return
-                if data.get("type") != "Turn" or not data.get("end_of_turn"):
+                message_type = data.get("type")
+                if message_type == "Error":
+                    raise PermanentError(
+                        f"AssemblyAI streaming error {data.get('error_code', 'unknown')}: "
+                        f"{data.get('error', 'unknown')}"
+                    )
+                if message_type == "Begin":
+                    nonlocal actual_model
+                    actual_model = (
+                        (data.get("configuration") or {}).get("model") or actual_model
+                    )
                     continue
+                if message_type == "Termination":
+                    return
+                if message_type != "Turn" or not data.get("end_of_turn"):
+                    continue
+
+                language_code = data.get("language_code")
+                if language_code:
+                    detected_languages.add(str(language_code))
+                for word in data.get("words", []):
+                    word_language = word.get("language_code") or word.get("language")
+                    if word_language:
+                        detected_languages.add(str(word_language))
 
                 transcript = data.get("transcript", "")
                 if transcript:
                     transcripts.append(transcript)
 
         receiver = asyncio.create_task(receive_messages())
+        send_error: BaseException | None = None
         try:
             for chunk in pcm16_chunks(audio_file_path, chunk_ms=STREAMING_CHUNK_MS):
                 await ws.send(chunk)
@@ -62,12 +96,30 @@ async def _transcribe_streaming(
                     f"AssemblyAI streaming termination timed out after "
                     f"{TERMINATION_TIMEOUT_S}s"
                 ) from exc
+        except BaseException as exc:
+            send_error = exc
         finally:
             if not receiver.done():
                 receiver.cancel()
+            receiver_error: BaseException | None = None
+            try:
+                await receiver
+            except asyncio.CancelledError:
+                pass
+            except BaseException as exc:
+                receiver_error = exc
             await ws.close()
 
-    return compact_text(transcripts)
+        if receiver_error is not None:
+            raise receiver_error
+        if send_error is not None:
+            raise send_error
+
+    return ProviderTranscription(
+        text=compact_text(transcripts),
+        actual_model=f"assembly/{actual_model}",
+        detected_languages=tuple(sorted(detected_languages)),
+    )
 
 
 @register("assembly")
@@ -79,34 +131,33 @@ class AssemblyAIProvider(APIProvider):
         sample: dict,
         use_url: bool = False,
         language: str = "en",
-    ) -> str:
+    ) -> ProviderTranscription:
         aai.settings.api_key = os.getenv("ASSEMBLYAI_API_KEY")
         transcriber = aai.Transcriber()
 
-        # Models like "universal-3-pro" use the newer speech_models (list) API
-        MULTI_MODEL_VARIANTS = {"universal-3-pro"}
+        if model_variant in {ASSEMBLY_ALIAS, LEGACY_ASSEMBLY_ALIAS}:
+            speech_models = [PRIMARY_MODEL, FALLBACK_MODEL]
+        else:
+            speech_models = [model_variant]
         language_config = (
             {"language_detection": True}
             if language == "unknown"
             else {"language_code": language}
         )
-        if model_variant in MULTI_MODEL_VARIANTS:
-            config = aai.TranscriptionConfig(
-                speech_models=[model_variant],
-                **language_config,
-            )
-        else:
-            config = aai.TranscriptionConfig(
-                speech_model=model_variant,
-                **language_config,
-            )
+        config = aai.TranscriptionConfig(
+            speech_models=speech_models,
+            **language_config,
+        )
 
         if use_url:
             audio_url = sample["row"]["audio"][0]["src"]
             audio_duration = sample["row"]["audio_length_s"]
             if audio_duration < 0.160:
                 print(f"Skipping audio duration {audio_duration}s")
-                return "."
+                return ProviderTranscription(
+                    text="",
+                    actual_model=f"assembly/{speech_models[0]}",
+                )
             transcript = transcriber.transcribe(audio_url, config=config)
         else:
             audio_duration = (
@@ -114,12 +165,24 @@ class AssemblyAIProvider(APIProvider):
             )
             if audio_duration < 0.160:
                 print(f"Skipping audio duration {audio_duration}s")
-                return "."
+                return ProviderTranscription(
+                    text="",
+                    actual_model=f"assembly/{speech_models[0]}",
+                )
             transcript = transcriber.transcribe(audio_file_path, config=config)
 
         if transcript.status == aai.TranscriptStatus.error:
             raise PermanentError(f"AssemblyAI transcription error: {transcript.error}")
-        return transcript.text or ""
+        response = getattr(transcript, "json_response", None) or {}
+        actual_model = response.get("speech_model_used") or speech_models[0]
+        detected_language = (
+            response.get("language_code") or getattr(transcript, "language_code", None)
+        )
+        return ProviderTranscription(
+            text=transcript.text or "",
+            actual_model=f"assembly/{actual_model}",
+            detected_languages=(str(detected_language),) if detected_language else (),
+        )
 
     def transcribe_streaming(
         self,
@@ -129,7 +192,7 @@ class AssemblyAIProvider(APIProvider):
         use_url: bool = False,
         language: str = "en",
         prompt: Optional[str] = None,
-    ) -> str:
+    ) -> ProviderTranscription:
         if use_url:
             raise PermanentError(
                 "AssemblyAI streaming provider requires local audio; do not use --use_url"
@@ -144,13 +207,10 @@ class AssemblyAIProvider(APIProvider):
             raise ValueError("ASSEMBLYAI_API_KEY environment variable not set")
 
         model = STREAMING_MODEL_MAP.get(model_variant, model_variant)
-        return (
-            asyncio.run(
-                _transcribe_streaming(
-                    audio_file_path=audio_file_path,
-                    api_key=api_key,
-                    model=model,
-                )
+        return asyncio.run(
+            _transcribe_streaming(
+                audio_file_path=audio_file_path,
+                api_key=api_key,
+                model=model,
             )
-            or "."
         )

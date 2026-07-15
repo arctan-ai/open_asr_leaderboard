@@ -31,7 +31,7 @@ TERMINAL_STATES = {"completed", "failed", "cancelled", "interrupted"}
 PROVIDERS = {
     "assembly": {
         "label": "AssemblyAI",
-        "models": ["universal-3-pro"],
+        "models": ["universal-stt"],
         "credentials": ["ASSEMBLYAI_API_KEY"],
     },
     "cartesia": {
@@ -243,6 +243,15 @@ class RunStore:
         summary_json = result.pop("summary_json")
         result["summary"] = json.loads(summary_json) if summary_json else None
         output_dir = Path(result["output_dir"])
+        progress_path = output_dir / "progress.json"
+        result["progress"] = None
+        if progress_path.is_file():
+            try:
+                result["progress"] = json.loads(
+                    progress_path.read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError):
+                pass
         artifacts = []
         if output_dir.exists():
             artifacts = sorted(
@@ -580,6 +589,7 @@ def create_app(
         async def events():
             offset = 0
             last_status = None
+            last_progress = None
             while True:
                 run = store.get(run_id)
                 if run is None:
@@ -597,6 +607,10 @@ def create_app(
                 if run["status"] != last_status:
                     last_status = run["status"]
                     yield f"event: status\ndata: {json.dumps(run)}\n\n"
+                progress = run.get("progress")
+                if progress != last_progress:
+                    last_progress = progress
+                    yield f"event: progress\ndata: {json.dumps(run)}\n\n"
                 if run["status"] in TERMINAL_STATES:
                     break
                 yield ": keep-alive\n\n"

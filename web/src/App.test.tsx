@@ -13,6 +13,10 @@ const options = {
       prefix: "sarvam", label: "Sarvam", models: ["saaras:v3"], configured: true,
       language_options: { "saaras:v3": { batch: [{ code: "unknown", label: "Automatic detection" }, { code: "en-IN", label: "English (India)" }], streaming: [{ code: "unknown", label: "Automatic detection" }, { code: "en-IN", label: "English (India)" }] } },
     },
+    {
+      prefix: "assembly", label: "AssemblyAI", models: ["universal-stt"], configured: true,
+      language_options: { "universal-stt": { batch: [{ code: "unknown", label: "Automatic detection" }, { code: "hi", label: "Hindi" }], streaming: [{ code: "unknown", label: "Automatic detection" }] } },
+    },
   ],
   preprocessors: ["none", "arctan", "rnnoise"],
   vad_positions: ["none", "pre", "post"],
@@ -44,6 +48,7 @@ const createdRun = {
     audio_preprocessor_batch_size: 1,
   },
   summary: null,
+  progress: null,
   error: null,
   artifacts: [],
 }
@@ -90,6 +95,32 @@ describe("Open ASR console", () => {
     expect((await screen.findAllByText("deepgram/nova-3")).length).toBeGreaterThan(0)
     const createCall = vi.mocked(fetch).mock.calls.find(([path, init]) => path === "/api/runs" && init?.method === "POST")
     expect(JSON.parse(String(createCall?.[1]?.body))).toEqual(expect.objectContaining({ language: "en" }))
+  })
+
+  it("shows the stable Assembly alias and live provider model", async () => {
+    const assemblyRun = {
+      ...createdRun,
+      status: "running",
+      config: { ...createdRun.config, model_name: "assembly/universal-stt", language: "unknown" },
+      progress: {
+        completed_samples: 3,
+        total_samples: 10,
+        actual_models: { "assembly/universal-3-5-pro": 3 },
+        detected_languages: { hi: 3 },
+      },
+    }
+    vi.mocked(fetch).mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === "/api/options") return jsonResponse(options)
+      if (path === "/api/runs" && !init?.method) return jsonResponse([assemblyRun])
+      if (path === "/api/health") return jsonResponse({ status: "ok", active_runs: 1 })
+      return jsonResponse({ detail: "not found" }, 404)
+    })
+
+    render(<App />)
+
+    expect((await screen.findAllByText("Assembly Universal STT")).length).toBeGreaterThan(0)
+    expect((await screen.findAllByText(/assembly\/universal-3-5-pro · 3/)).length).toBeGreaterThan(0)
   })
 
   it("inspects a dataset and shows its schema", async () => {

@@ -6,7 +6,7 @@ from typing import Optional
 
 import requests
 
-from . import APIProvider, PermanentError, register
+from . import APIProvider, PermanentError, ProviderTranscription, register
 from .streaming_utils import connect_websocket, pcm16_chunks
 
 SONIOX_API_BASE_URL = "https://api.soniox.com"
@@ -27,6 +27,18 @@ def _render_tokens(tokens: list[dict]) -> str:
         if str(token.get("text", "")) and str(token.get("text", "")) != "<end>"
     )
     return " ".join(text.split())
+
+
+def _token_languages(tokens: list[dict]) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            {
+                str(language)
+                for token in tokens
+                if (language := token.get("language"))
+            }
+        )
+    )
 
 
 def _resolve_streaming_model(model_variant: str) -> str:
@@ -70,6 +82,8 @@ def _create_transcription(
     }
     if language != "unknown":
         payload["language_hints"] = [language]
+    else:
+        payload["enable_language_identification"] = True
     response = session.post(
         f"{SONIOX_API_BASE_URL}/v1/transcriptions",
         json=payload,
@@ -102,13 +116,13 @@ def _wait_until_completed(session: requests.Session, transcription_id: str) -> N
         time.sleep(POLL_INTERVAL_S)
 
 
-def _get_transcript(session: requests.Session, transcription_id: str) -> str:
+def _get_transcript(session: requests.Session, transcription_id: str) -> dict:
     response = session.get(
         f"{SONIOX_API_BASE_URL}/v1/transcriptions/{transcription_id}/transcript",
         timeout=60,
     )
     _raise_for_permanent_client_error(response)
-    return response.json().get("text", "")
+    return response.json()
 
 
 async def _transcribe_streaming(
@@ -116,7 +130,7 @@ async def _transcribe_streaming(
     api_key: str,
     model: str,
     language: str,
-) -> str:
+) -> ProviderTranscription:
     config = {
         "api_key": api_key,
         "model": model,
@@ -126,7 +140,10 @@ async def _transcribe_streaming(
     }
     if language != "unknown":
         config["language_hints"] = [language]
+    else:
+        config["enable_language_identification"] = True
     final_text_parts = []
+    detected_languages: set[str] = set()
 
     async with connect_websocket(SONIOX_STREAMING_ENDPOINT) as ws:
         await ws.send(json.dumps(config))
@@ -148,6 +165,8 @@ async def _transcribe_streaming(
                     text = str(token.get("text", ""))
                     if token.get("is_final") and text and text != "<end>":
                         final_text_parts.append(text)
+                        if token.get("language"):
+                            detected_languages.add(str(token["language"]))
 
                 if data.get("finished"):
                     return
@@ -164,7 +183,11 @@ async def _transcribe_streaming(
                 receiver.cancel()
             await ws.close()
 
-    return " ".join("".join(final_text_parts).split())
+    return ProviderTranscription(
+        text=" ".join("".join(final_text_parts).split()),
+        actual_model=f"soniox/{model}",
+        detected_languages=tuple(sorted(detected_languages)),
+    )
 
 
 def _delete_transcription(session: requests.Session, transcription_id: str) -> None:
@@ -196,7 +219,7 @@ class SonioxProvider(APIProvider):
         use_url: bool = False,
         language: str = "en",
         prompt: Optional[str] = None,
-    ) -> str:
+    ) -> ProviderTranscription:
         if use_url:
             raise PermanentError(
                 "Soniox provider requires local audio; do not use --use_url"
@@ -223,7 +246,13 @@ class SonioxProvider(APIProvider):
                 language=language,
             )
             _wait_until_completed(session, transcription_id)
-            return _get_transcript(session, transcription_id) or "."
+            transcript = _get_transcript(session, transcription_id)
+            tokens = transcript.get("tokens") or []
+            return ProviderTranscription(
+                text=transcript.get("text", "") or _render_tokens(tokens),
+                actual_model=f"soniox/{model}",
+                detected_languages=_token_languages(tokens),
+            )
         finally:
             if transcription_id is not None:
                 try:
@@ -244,7 +273,7 @@ class SonioxProvider(APIProvider):
         use_url: bool = False,
         language: str = "en",
         prompt: Optional[str] = None,
-    ) -> str:
+    ) -> ProviderTranscription:
         if use_url:
             raise PermanentError(
                 "Soniox streaming provider requires local audio; do not use --use_url"
@@ -259,14 +288,11 @@ class SonioxProvider(APIProvider):
             raise ValueError("SONIOX_API_KEY environment variable not set")
 
         model = _resolve_streaming_model(model_variant)
-        return (
-            asyncio.run(
-                _transcribe_streaming(
-                    audio_file_path=audio_file_path,
-                    api_key=api_key,
-                    model=model,
-                    language=language,
-                )
+        return asyncio.run(
+            _transcribe_streaming(
+                audio_file_path=audio_file_path,
+                api_key=api_key,
+                model=model,
+                language=language,
             )
-            or "."
         )
